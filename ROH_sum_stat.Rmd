@@ -1,0 +1,709 @@
+---
+title: "ROH_summary_statistics"
+output: html_document
+date: "2025-06-11"
+---
+
+### This file contains code for calculating ROH summary statistics for worldwide and Near Oceanic populations
+```{r}
+options(scipen = 999)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(ggsci)
+library(data.table)
+library(tidyverse)
+library(purrr)
+library(cowplot) 
+library(ggplotify)
+library(ggtext)
+library(dunn.test)
+library(stats)
+```
+
+### Create .hom and .hom.indiv files
+```{bash}
+#!/bin/bash
+#SBATCH --job-name={prefix}_MAF0.01_LDpruned_ROH
+#SBATCH --mem=4G
+#SBATCH --cpus-per-task=10
+#SBATCH --time=30:00
+#SBATCH --output={prefix}_MAF0.01_LDpruned_ROH_500Kb.log
+
+#replace with specific PLINK version (PLINK 1.9)
+PLINK="PLINK/1.9b_6.21-x86_64"
+
+#prefix for LD and MAF0.01 pruned bed/bim/fam files 
+#contaminated/related/etc. individuals were removed prior to pruning
+prefix="./[input_file]"
+
+out_prefix="global_autosomes"
+
+module load ${PLINK}
+
+plink --threads 10 \
+--not-chr 23 \
+--homozyg \
+--homozyg-kb 500 \
+--homozyg-snp 50 \
+--homozyg-window-snp 50 \
+--homozyg-window-het 0 \
+--homozyg-window-missing 5 \
+--homozyg-window-threshold 0.05 \
+--homozyg-density 5000 \
+--homozyg-gap 5000 \
+--bfile ${prefix} \
+--out ${out_prefix}_500Kb
+
+```
+
+
+```{r}
+#read in .hom and .hom.indiv files
+hom_indiv <- read.table("./data_files/[filename].hom.indiv", header = TRUE)
+
+hom <- read.table("./data_files/[filename].hom", header = TRUE)
+
+#metadata file containing sampleIDs, Region, Population information
+#contaminated/related/etc. individuals have been excluded from this metadata file
+#Vanuatu was already removed in the MAF and LD pruning step in PLINK, but this is just an extra step to make sure
+metadata <- read.table("./[filename].tsv", sep = "\t", header = TRUE, fill = TRUE) %>%
+  filter(Island != "Vanuatu" ) %>%
+  dplyr::select(SampleID, Region, Population, Island)
+
+#Oceania IDs only
+OCN_included_samps <- metadata %>% filter(Region %in% "Oceania") 
+
+#merge with hom.indiv
+global_indiv <- merge(hom_indiv, metadata, by.x = "IID", by.y = "SampleID") %>%
+  dplyr::select(IID, NSEG, KB, Region, Population, Island) %>%
+  mutate(MB = KB*0.001)
+
+#centromere regions
+centromere_bed <- read.table("./data_files/hs37d5_hg19_centromeres.bed") %>%
+  `colnames<-`(c("CHR", "centro_POS1", "centro_POS2"))
+
+#remove from hom file
+no_centro_hom <- centromere_bed %>%
+  filter(CHR != c("X", "Y")) %>%
+  mutate(CHR = as.numeric(CHR), centro_POS1 = as.numeric(centro_POS1), centro_POS2 = as.numeric(centro_POS2)) %>%
+  left_join(hom, ., by = "CHR") %>%
+  filter(POS1 > centro_POS2 | POS2 < centro_POS1+1) #add one to convert from BED coords
+
+#add in metadata info
+global_no_centro_hom <- merge(no_centro_hom, metadata, by.x = "IID", by.y = "SampleID") %>% 
+  dplyr::select(-centro_POS1, -centro_POS2) %>%
+  mutate(MB = KB*0.001)
+
+#merged Oceanic groupings
+renbell <- c("Rennell|Bellona")
+lavonmus <- c("Lavongai|Mussau")
+nainot <- c("Nailik|Notsi|Tigak")
+nakman <- c("Nakanai|Mangseng")
+sepgor <- c("Sepik|Goroka")
+
+#replace names in df with groupings
+global_no_centro_hom_merge <- global_no_centro_hom %>%
+  mutate(Population = str_replace_all(Population, lavonmus, "Lavongai-Mussau"), Island = str_replace_all(Island, 'Mussau', "New Hanover")) %>%
+  mutate(Population = str_replace_all(Population, nainot, "Nailik-Notsi-Tigak")) %>%
+  mutate(Population = str_replace_all(Population, renbell, "Rennell-Bellona")) %>%
+  mutate(Population = str_replace_all(Population, nakman, "Nakanai-Mangseng")) %>%
+  mutate(Population = str_replace_all(Population, sepgor, "Goroka-Sepik")) %>%
+  mutate(Population = str_replace_all(Population, c('Santa Cruz' = "Santa-Cruz", 'Vella Lavella' = "Vella-Lavella")))
+
+
+# write to table 
+#write.table(global_no_centro_hom_merge, "./data_files/global_MAF_LD_no_centro_hom_500Kb.tsv", sep = "\t", col.names = TRUE)
+
+#summarize sROH and nROH per individual (creates a df that is pretty much the same as the hom.indiv file)
+global_no_centro_hom_summary <- global_no_centro_hom_merge %>%
+  group_by(IID, Population, Region, .drop = FALSE) %>%
+  summarise(sum_MB = sum(MB), nseg = n())
+```
+
+### visualize sROH
+```{r}
+global_region_levels <- c("Africa", "Middle_East", "Europe", "Central_South_Asia", "East_Asia", "America", "Island_Southeast_Asia", "Oceania")
+
+global_pop_levels <- c("Mbuti", "Biaka", "Mandenka", "Yoruba", "San", "BantuSouthAfrica", "BantuKenya",
+                       "Druze", "Bedouin", "Palestinian", "Mozabite",
+                       "French", "Sardinian", "Orcadian", "Russian", "BergamoItalian", "Tuscan", "Basque", "Adygei",
+                       "Brahui", "Balochi", "Hazara", "Makrani", "Sindhi", "Pathan", "Kalash", "Burusho", "Uygur",
+                       "Atayal", "Paiwan", "Cambodian", "Japanese", "Han", "Yakut", "Tujia", "Yi", "Miao", "Oroqen", 
+                       "Daur", "Mongolian", "Hezhen", "Xibo", "NorthernHan", "Dai", "Lahu", "She", "Naxi", "Tu",
+                       "Colombian", "Surui", "Maya", "Karitiana", "Pima", 
+                       "Agta", "Cebuano", "Rampasasa",
+                       "Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "Baining-Kagat","Baining-Mali",
+                       "Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz",
+                       "Rennell-Bellona", "Tikopia")
+
+## function to get the names of the segments in the plot with correct spacing
+addline_format <- function(x,...){
+    gsub('//s','/n',x)
+}
+
+global_no_centro_hom_summary$Region <- factor(global_no_centro_hom_summary$Region, levels = global_region_levels)
+global_no_centro_hom_summary$Population <- factor(global_no_centro_hom_summary$Population, levels = global_pop_levels)
+
+ggplot(data = global_no_centro_hom_summary) +
+  geom_boxplot(mapping = aes(x = Population, y = sum_MB, fill = Region),
+               alpha = 0.9,
+               size = 0.25,
+               outlier.size = 0.6) +
+  annotate("segment", x=0, y=-130, xend=7.5, 
+           yend=-130, size=1.5, col="#FF8966") +
+  annotate("text", x = 3.75, y = -150, label = "Africa", size = 13/.pt, angle = 45) +
+  annotate("segment", x=7.6, y=-130, xend=11.5, 
+           yend=-130, size=1.5, col = "#CA2E55") +
+  annotate("text", x = 9, y = -160, label = addline_format("Middle East"), 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=11.6, y=-130, xend=18.9, 
+           yend=-130, size=1.5, col = "#F6AE2D") +
+  annotate("text", x = 14, y = -150, label = "Europe", 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=19, y=-130, xend=28.5, 
+           yend=-130, size=1.5, col = "#EB7BC0") +
+  annotate("text", x = 23.5, y = -170, label = addline_format("Central/ South Asia"), 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=28.6, y=-130, xend=48.9, 
+           yend=-130, size=1.5, col = "#60992D") +
+  annotate("text", x = 37.5, y = -155, label = "East Asia", 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=49, y=-130, xend=53.9, 
+           yend=-130, size=1.5, col = "#5887FF") +
+  annotate("text", x = 50, y = -150, label = "America", 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=54, y=-130, xend=56.9, 
+           yend=-130, size=1.5, col = "#7E1F86") +
+  annotate("text", x = 55, y = -157, label = addline_format("Island SEA"), 
+           size = 13/.pt, angle = 45) +
+  annotate("segment", x=57, y=-130, xend=73, 
+           yend=-130, size=1.5, col = "#95D9DA") +
+  annotate("text", x = 65.5, y = -150, label = "Oceania", size = 13/.pt, angle = 45) +
+  scale_fill_manual(values = c("#FF8966", "#CA2E55","#F6AE2D","#EB7BC0","#60992D",
+                                         "#5887FF","#7E1F86","#95D9DA")) +
+  labs(y = expression("Cumulative Sum ROH (Mbp)")) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 9),
+        axis.text.y = element_text(size = 9),
+        axis.title.x=element_blank(),
+        axis.title.y=element_text(size = 11),
+        panel.grid.major = element_blank(),
+        plot.margin = unit(c(0.5,1,5,1), "lines"),
+        panel.border = element_rect(linewidth = 1)) +
+  coord_cartesian(clip = "off", ylim = c(0, 700))
+
+#ggsave("./figures/Fig1_panel_global_all_ROH.pdf", plot = last_plot(), width = 16, height = 10, units = "cm")
+#ggsave("./figures/Fig1_panel_global_all_ROH.png", plot = last_plot(), width = 16, height = 10, units = "cm")
+```
+
+
+### Quantitative measurements of sROH and nROH globally
+```{r}
+
+#summarise total, means, and medians for sROH and nROH per population
+pop_summary <- global_no_centro_hom_summary %>%
+  group_by(Population, Region, .drop = FALSE) %>%
+  summarise(pop_sum_MB = sum(sum_MB), 
+            pop_nseg = sum(nseg),
+            avg_sum_MB = mean(sum_MB),
+            avg_nseg = mean(nseg),
+            median_sum_MB = median(sum_MB),
+            median_nseg = median(nseg),
+            min_sum_MB = min(sum_MB),
+            max_sum_MB = max(sum_MB),
+            min_nseg = min(nseg),
+            max_nseg = max(nseg),
+            n = n_distinct(IID)) %>%
+  left_join(., global_fROH_avg, by = c("Population", "Region")) %>%
+  mutate(Region = factor(Region, levels = global_region_levels)) %>%
+  arrange()
+
+#summarise per region 
+region_summary <- global_no_centro_hom_summary %>%
+  group_by(Region, .drop = FALSE) %>%
+  summarise(pop_sum_MB = sum(sum_MB), 
+            pop_nseg = sum(nseg),
+            avg_sum_MB = mean(sum_MB),
+            avg_nseg = mean(nseg),
+            median_sum_MB = median(sum_MB),
+            median_nseg = median(nseg),
+            min_sum_MB = min(sum_MB),
+            max_sum_MB = max(sum_MB),
+            min_nseg = min(nseg),
+            max_nseg = max(nseg),
+            n = n_distinct(IID)) %>%
+  mutate(avg_MB = pop_sum_MB/n, 
+         avg_nseg = pop_nseg/n, 
+         Region = factor(Region, levels = global_region_levels)) %>%
+  arrange()
+
+#calculate variance per region
+region_var <- global_no_centro_hom_summary %>%
+  group_by(Region, .drop = FALSE) %>%
+  summarise(sd_sROH = sd(sum_MB),
+            sd_nROH = sd(nseg),
+            var_sROH = var(sum_MB),
+            var_nROH = var(nseg)) %>%
+  arrange(var_sROH)
+
+pop_summary_format <- pop_summary %>%
+  dplyr::select(-pop_sum_MB, -pop_nseg) %>%
+  mutate(avg_sum_MB = round(avg_sum_MB, 3),
+         avg_nseg = round(avg_nseg, 3),
+         min_sum_MB = round(min_sum_MB, 3),
+         max_sum_MB = round(max_sum_MB, 3),
+         median_sum_MB = round(median_sum_MB, 3),
+         avg_fROH = round(avg_fROH, 3),
+         min_fROH = round(min_fROH, 3),
+         max_fROH = round(max_fROH, 3),
+         median_fROH = round(median_fROH, 3)) %>%
+  mutate(minmax_sROH = paste0(min_sum_MB, "-", max_sum_MB),
+         minmax_nROH = paste0(min_nseg, "-", max_nseg)) %>%
+  mutate(med_range_sROH = paste0(median_sum_MB, " ", "(", minmax_sROH, ")"),
+         med_range_nROH = paste0(median_nseg, " ", "(", minmax_nROH, ")"),
+         Population = factor(Population, levels = global_pop_levels),
+         Region = factor(Region, levels = global_region_levels)) %>%
+  arrange(Region) %>%
+  dplyr::select(Population, Region, n, avg_sum_MB, 
+                avg_nseg, med_range_sROH, med_range_nROH, median_fROH, max_fROH) %>%
+  relocate(n, .after = Region) %>%
+  `colnames<-`(c('Population',
+                 'Region',
+                 'n',
+                 'Mean sROH',
+                 'Mean nROH',
+                 'Median sROH (Range)',
+                 'Median nROH (Range)',
+                 'Median FROH',
+                 'Max fROH'
+                 ))
+
+#write.table(pop_summary_format, "./figures/TableS2_global_sum_stats.tsv", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+#length of the unmasked autosomal genome
+
+```
+
+### Global FROH sum stats
+```{r}
+total_auto <- 2684.673005
+
+# filter above 1.5Mb according to McQuillan et al and divide by total autosomal length
+# 1170 total individuals, so some had no calls over 1.5Mb
+global_fROH <- global_no_centro_hom_merge %>%
+  filter(MB >= 1.5) %>%
+  group_by(IID, Population, Region, .drop = FALSE) %>%
+  summarise(sum_MB = sum(MB), nseg = n()) %>%
+  mutate(FROH = sum_MB/total_auto) %>%
+  mutate(FROH_percent = FROH *100) %>%
+  ungroup()
+
+global_fROH$Region <- factor(global_fROH$Region, levels = global_region_levels)
+global_fROH$Population <- factor(global_fROH$Population, levels = global_pop_levels)
+
+#fROH measurements
+fROH_pop_summary <- global_fROH %>%
+  group_by(Population, Region) %>%
+  summarise(avg_fROH = mean(FROH),
+            min_fROH = min(FROH),
+            max_fROH = max(FROH),
+            median_fROH = median(FROH))
+
+#avg fROH per region
+fROH_region_summary <- global_fROH %>%
+  group_by(Region) %>%
+  summarise(avg_fROH = mean(FROH),
+            min_fROH = min(FROH),
+            max_fROH = max(FROH),
+            median_fROH = median(FROH))
+
+```
+
+### Sum stats for Oceania only
+```{r}
+Oceania_pop_summary <- global_no_centro_hom_summary %>%
+  filter(Region == "Oceania") %>%
+  dplyr::select(-pop_sum_MB, -pop_nseg) %>%
+  mutate(avg_sum_MB = round(avg_sum_MB, 3),
+         avg_nseg = round(avg_nseg, 3),
+         min_sum_MB = round(min_sum_MB, 3),
+         max_sum_MB = round(max_sum_MB, 3),
+         median_sum_MB = round(median_sum_MB, 3),
+         avg_fROH = round(avg_fROH, 3),
+         min_fROH = round(min_fROH, 3),
+         max_fROH = round(max_fROH, 3),
+         median_fROH = round(median_fROH, 3)) %>%
+  mutate(minmax_sROH = paste0(min_sum_MB, "-", max_sum_MB),
+         minmax_nROH = paste0(min_nseg, "-", max_nseg)) %>%
+  mutate(med_range_sROH = paste0(median_sum_MB, " ", "(", minmax_sROH, ")"),
+         med_range_nROH = paste0(median_nseg, " ", "(", minmax_nROH, ")"),
+         Population = factor(Population, levels = global_pop_levels),
+         Region = factor(Region, levels = global_region_levels)) %>%
+  arrange(Region) %>%
+  dplyr::select(Population, Region, n, avg_sum_MB, 
+                avg_nseg, med_range_sROH, med_range_nROH, median_fROH, max_fROH) %>%
+  relocate(n, .after = Region) %>%
+  `colnames<-`(c('Population',
+                 'Region',
+                 'n',
+                 'Mean sROH',
+                 'Mean nROH',
+                 'Median sROH (Range)',
+                 'Median nROH (Range)',
+                 'Median FROH',
+                 'Max fROH'
+                 ))
+
+#write.table(Oceania_pop_summary, "./figures/Table1_OCN_sum_stats.tsv", 
+#            sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+
+```
+
+### Summarize per length category, global
+```{r}
+
+#global populations, separate into length groups
+global_length_groups <- global_no_centro_hom %>%
+  group_by(Population) %>%
+  mutate(group = case_when(
+    MB <= 1 ~ "0.5-1",
+    MB > 1 & MB <= 2 ~ "1-2", 
+    MB > 2 & MB <= 4 ~ "2-4",
+    MB > 4 & MB <= 8 ~ "4-8", 
+    MB > 8 & MB <= 16 ~ "8-16",
+    MB > 16 & MB <= 32 ~ "16-32",
+    MB > 32 ~ "32+"
+  ))
+
+global_length_groups$group <- factor(global_length_groups$group, 
+                                      levels = level_order <- c("0.5-1","1-2", "2-4", 
+                                                                "4-8", "8-16", "16-32", "32+"))
+
+global_length_groups$Population <- factor(global_length_groups$Population, levels = global_pop_levels)
+global_length_groups$Region <- factor(global_length_groups$Region, levels = global_region_levels)
+
+
+#summarize sum stats
+global_length_group_summary <- global_length_groups %>%
+  group_by(IID, group, .drop = FALSE) %>% #.drop = FALSE to keep the 0 values
+  summarise(totalMB_per_cat = sum(MB), 
+            total_nseg_per_cat = n()) %>%
+  left_join(., metadata, by = c("IID" = "SampleID")) %>%
+  dplyr::select(IID, group, totalMB_per_cat, total_nseg_per_cat, Region, Population) %>%
+  group_by(group, Region) %>%
+  summarise(mean_sROH = mean(totalMB_per_cat),
+            min_sROH = min(totalMB_per_cat),
+            max_sROH = max(totalMB_per_cat),
+            sd_sROH = sd(totalMB_per_cat),
+            mean_nROH = mean(total_nseg_per_cat),
+            min_nROH = min(total_nseg_per_cat),
+            max_nROH = max(total_nseg_per_cat),
+            sd_nROH = sd(total_nseg_per_cat))
+
+```
+
+
+#summarize per length catergory, Oceania specific
+```{r}
+#Oceania pop levels
+island_levels <- c("Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "Baining-Kagat","Baining-Mali",
+                   "Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz", "Rennell-Bellona", "Tikopia")
+
+Oceania_length_groups <- global_no_centro_hom %>%
+  filter(Region == "Oceania") %>%
+  group_by(Population) %>%
+  mutate(group = case_when(
+    MB <= 1 ~ "0.5-1",
+    MB > 1 & MB <= 2 ~ "1-2", 
+    MB > 2 & MB <= 4 ~ "2-4",
+    MB > 4 & MB <= 8 ~ "4-8", 
+    MB > 8 & MB <= 16 ~ "8-16",
+    MB > 16 & MB <= 32 ~ "16-32",
+    MB > 32 ~ "32+"
+  ))
+
+Oceania_length_groups$group <- factor(Oceania_length_groups$group, levels = level_order <- c("0.5-1","1-2", "2-4", 
+                                                                                             "4-8", "8-16", "16-32", "32+"))
+Oceania_length_groups$Population <- factor(Oceania_length_groups$Population, levels = island_levels)
+
+Oceania_length_group_summary <- Oceania_length_groups %>%
+  group_by(IID, group, .drop = FALSE) %>% #.drop = FALSE to keep the 0 values
+  summarise(totalMB_per_cat = sum(MB), 
+            total_nseg_per_cat = n()) %>%
+  left_join(., included_samps, by = c("IID" = "SampleID")) %>%
+  mutate(Population = str_replace_all(Population, lavonmus, "Lavongai-Mussau"), Island = str_replace_all(Island, 'Mussau', "New Hanover")) %>%
+  mutate(Population = str_replace_all(Population, nainot, "Nailik-Notsi-Tigak")) %>%
+  mutate(Population = str_replace_all(Population, renbell, "Rennell-Bellona")) %>%
+  mutate(Population = str_replace_all(Population, nakman, "Nakanai-Mangseng")) %>%
+  mutate(Population = str_replace_all(Population, sepgor, "Goroka-Sepik")) %>%
+  mutate(Population = str_replace_all(Population, c('Santa Cruz' = "Santa-Cruz", 'Vella Lavella' = "Vella-Lavella"))) %>%
+  dplyr::select(IID, group, totalMB_per_cat, total_nseg_per_cat, Region, Population) %>%
+  group_by(Population, group, .drop = FALSE) %>%
+  summarise(mean_sROH = mean(totalMB_per_cat),
+            median_sROH = median(totalMB_per_cat),
+            sd_sROH = sd(totalMB_per_cat),
+            mean_nROH = mean(total_nseg_per_cat),
+            median_nROH = median(total_nseg_per_cat),
+            sd_nROH = sd(total_nseg_per_cat))
+
+Oceania_length_group_summary$Population <- factor(Oceania_length_group_summary$Population, levels = island_levels)
+
+
+#how many individuals have ROH above a certain length category
+OCN_ind_4to8 <- Oceania_length_groups %>%    
+  filter(group == "4-8") %>%
+  summarise(ind = unique(IID))
+
+OCN_ind_8to16 <- Oceania_length_groups %>%   
+  filter(group == "8-16") %>%
+  summarise(ind = unique(IID))
+
+OCN_ind_16to32 <- Oceania_length_groups %>%  
+  filter(group == "16-32") %>%
+  summarise(ind = unique(IID))
+
+#encode shapes for plotting
+island_shapes <- c(17,16,18,17,15,18,15,16,15,16,15,16,15,17,16,16,18)
+
+#color scheme
+# 8 total island groups, this is broken up more so by ancestry components + geography
+island_col2 <- c("#225ea8", "#AF96FF", "#AF96FF", "#c7e9b4", "#c7e9b4", "#c7e9b4", "#7fcd88", "#7fcd88", "#41b6c4", "#41b6c4","#FBE83A", "#FBE83A", "#90CBEF", "#90CBEF", "#90CBEF", "#544287", "#544287")
+
+OCN_sROH_lineplot <- Oceania_length_group_summary %>%
+  ggplot() +
+  geom_line(aes(x = group, y = median_sROH, col = Population, group = Population), size = 1.2) +
+  geom_point(aes(x = group, y = median_sROH, col = Population, fill = Population, shape = Population), size = 4) +
+  scale_color_manual(values = island_col) +
+  scale_fill_manual(values = island_col) +
+  scale_shape_manual(values = island_shapes) + 
+  labs(y = expression("Cumulative sROH"), x = "Length Category (Mbp)") +
+  scale_x_discrete(expand = c(0,0)) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 11),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        axis.title.y = element_text(size = 11),
+        axis.text.x = element_text(size = 11),
+        axis.text.y = element_text(size = 11),
+        legend.position = "none",
+        panel.border = element_rect(linewidth = 1))
+OCN_sROH_lineplot
+
+#ggsave("../figures/Figure2_OCN_sROH_lineplot_allcol.pdf", OCN_sROH_lineplot, width = 12, height = 10, unit = "cm")
+#ggsave("../figures/Figure2_OCN_sROH_lineplot_allcol.png", OCN_sROH_lineplot, width = 12, height = 10, unit = "cm")
+```
+
+### Kruskal-Wallis-Dunn test to compare medians worldwide
+```{r}
+#by region
+global_region_KW <- global_no_centro_hom %>%
+  group_by(IID, Region, .drop = FALSE) %>%
+  summarise(sum_MB = sum(MB), nseg = n()) %>%
+  mutate(Region = factor(Region, levels = global_region_levels)) %>%
+  arrange(Region)
+
+#KW 
+kruskal.test(sum_MB ~ Region, data = global_region_KW)
+kruskal.test(nseg ~ Region, data = global_region_KW)
+
+#dunn test by region
+dunn_total_sumMB <- dunn.test(x = global_region_KW$sum_MB,    #sROH
+          g = global_region_KW$Region,
+          method = "bonferroni",
+          kw = TRUE,
+          label = TRUE,
+          table = TRUE,
+          wrap = TRUE)
+dunn_total_nseg <- dunn.test(x = global_region_KW$nseg,    #nROH
+          g = global_region_KW$Region,
+          method = "bonferroni",
+          kw = TRUE,
+          label = TRUE,
+          table = TRUE,
+          wrap = TRUE)
+
+
+#for plotting 
+# by region
+total_sumMB_df <- data.frame(compare1 = dunn_total_sumMB$comparisons,
+                                   adj_pval = dunn_total_sumMB$P.adjusted) %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+total_sumMB_df <- bind_rows(total_sumMB_df, 
+                                 total_sumMB_df %>%
+                                   mutate(tmp1 = pop2, tmp2 = pop1) %>%
+                                   dplyr::select(-c(pop1,pop2)) %>%
+                                   mutate(pop1 = tmp1, pop2 = tmp2) %>%
+                                   dplyr::select(-c(tmp1, tmp2)))
+
+total_sumMB_df$pop1 <- factor(total_sumMB_df$pop1, levels = global_region_levels)
+total_sumMB_df$pop2 <- factor(total_sumMB_df$pop2, levels = global_region_levels)
+
+
+total_nseg_df <- data.frame(compare1 = dunn_total_nseg$comparisons,
+                                   adj_pval = dunn_total_nseg$P.adjusted) %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+total_nseg_df <- bind_rows(total_nseg_df, 
+                                 total_nseg_df %>%
+                                   mutate(tmp1 = pop2, tmp2 = pop1) %>%
+                                   dplyr::select(-c(pop1,pop2)) %>%
+                                   mutate(pop1 = tmp1, pop2 = tmp2) %>%
+                                   dplyr::select(-c(tmp1, tmp2)))
+
+total_nseg_df$pop1 <- factor(total_nseg_df$pop1, levels = global_region_levels)
+total_nseg_df$pop2 <- factor(total_nseg_df$pop2, levels = global_region_levels)
+
+#plots
+total_sumMB_plot <- total_sumMB_df %>% ggplot() +
+  geom_raster(aes(x = pop1, y = pop2, fill = neg_log10)) +
+  scale_fill_gradient(low = "#BAD4C9", high = "#274739") + #low is sig pval, darker color
+  scale_x_discrete(labels = c("Africa", "Middle_East", "Europe", "Central_South_Asia", "East_Asia", "America", "Island_Southeast_Asia", "Oceania")) +
+  scale_y_discrete(labels = c("Africa", "Middle_East", "Europe", "Central_South_Asia", "East_Asia", "America", "Island_Southeast_Asia", "Oceania")) +
+  theme_bw() +
+  labs(fill = expression(paste("Adjusted","-log10",~"p-value"))) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 90, vjust = .5, hjust = 0.9, size = 8),
+        axis.text.y = ggtext::element_markdown(size = 8),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+total_nseg_plot <- total_nseg_df %>% ggplot() +
+  geom_raster(aes(x = pop1, y = pop2, fill = neg_log10)) +
+  scale_fill_gradient(low = "#BAD4C9", high = "#274739") + #low is sig pval, darker color
+  scale_x_discrete(labels = c("Africa", "Middle_East", "Europe", "Central_South_Asia", "East_Asia", "America", "Island_Southeast_Asia", "Oceania")) +
+  scale_y_discrete(labels = c("Africa", "Middle_East", "Europe", "Central_South_Asia", "East_Asia", "America", "Island_Southeast_Asia", "Oceania")) +
+  theme_bw() +
+  labs(fill = expression(paste("Adjusted","-log10",~"p-value"))) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 90, vjust = .5, hjust = 0.9, size = 8),
+        axis.text.y = ggtext::element_markdown(size = 8),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+#ggsave("./figures/all_dunn_global_region_plot.png", plot = dunn_global_region, width = 14, height = 10, units = "cm")
+#ggsave("./figures/all_dunn_global_region_plot.pdf", plot = dunn_global_region, width = 14, height = 10, units = "cm")
+```
+
+### Kruskal-Wallis-Dunn test to compare medians in Oceania
+```{r}
+# gives sROH and nROH per individual in Oceania
+Oceania_KW <- global_MAF_LD_no_centro_hom %>%
+  filter(Region =="Oceania") %>%
+  group_by(IID, Population, Region, .drop = FALSE) %>%
+  summarise(sum_MB = sum(MB), nseg = n()) %>%
+  mutate(Population = factor(Population, levels = island_levels))
+
+#test for both sROH and nROH
+#if p-val shows significant difference, move on to Dunn test
+kruskal.test(sum_MB ~ Population, data = Oceania_KW)
+kruskal.test(nseg ~ Population, data = Oceania_KW)
+
+OCN_dunn_total_sumMB <- dunn.test(x = Oceania_KW$sum_MB,    #sROH
+          g = Oceania_KW$Population,
+          method = "bonferroni",
+          kw = TRUE,
+          label = TRUE,
+          table = TRUE,
+          wrap = TRUE)
+OCN_dunn_total_NSEG <- dunn.test(x = Oceania_KW$nseg,    #nROH
+          g = Oceania_KW$Population,
+          method = "bonferroni",
+          kw = TRUE,
+          label = TRUE,
+          table = TRUE,
+          wrap = TRUE)
+
+OCN_total_sumMB_df <- data.frame(adj_pval = OCN_dunn_total_sumMB$P.adjusted, compare1 = OCN_dunn_total_sumMB$comparisons)
+OCN_total_sumMB_df <- OCN_total_sumMB_df %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+OCN_total_nseg_df <- data.frame(adj_pval = OCN_dunn_total_NSEG$P.adjusted, compare1 = OCN_dunn_total_NSEG$comparisons)
+OCN_total_nseg_df <- OCN_total_nseg_df %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+
+#produce heatmap plots 
+
+#sumMB for plotting 
+OCN_total_sumMB_df <- data.frame(compare1 = OCN_dunn_total_sumMB$comparisons,
+                                   adj_pval = OCN_dunn_total_sumMB$P.adjusted) %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+OCN_total_sumMB_df <- bind_rows(OCN_total_sumMB_df, 
+                                 OCN_total_sumMB_df %>%
+                                   mutate(tmp1 = pop2, tmp2 = pop1) %>%
+                                   dplyr::select(-c(pop1,pop2)) %>%
+                                   mutate(pop1 = tmp1, pop2 = tmp2) %>%
+                                   dplyr::select(-c(tmp1, tmp2)))
+
+OCN_total_sumMB_df$pop1 <- factor(OCN_total_sumMB_df$pop1, levels = island_levels)
+OCN_total_sumMB_df$pop2 <- factor(OCN_total_sumMB_df$pop2, levels = island_levels)
+
+#nseg for plotting
+OCN_total_NSEG_df <- data.frame(compare1 = OCN_dunn_total_NSEG$comparisons,
+                                   adj_pval = OCN_dunn_total_NSEG$P.adjusted) %>%
+  separate(., col = compare1, c("pop1", "pop2"), sep = " - ") %>%
+  mutate(neg_log10 = -log10(adj_pval))
+
+OCN_total_NSEG_df<- bind_rows(OCN_total_NSEG_df, 
+                                 OCN_total_NSEG_df %>%
+                                   mutate(tmp1 = pop2, tmp2 = pop1) %>%
+                                   dplyr::select(-c(pop1,pop2)) %>%
+                                   mutate(pop1 = tmp1, pop2 = tmp2) %>%
+                                   dplyr::select(-c(tmp1, tmp2)))
+
+OCN_total_NSEG_df$pop1 <- factor(OCN_total_NSEG_df$pop1, levels = island_levels)
+OCN_total_NSEG_df$pop2 <- factor(OCN_total_NSEG_df$pop2, levels = island_levels)
+
+
+OCN_total_sumMB_plot <- OCN_total_sumMB_df %>% ggplot() +
+  geom_raster(aes(x = pop1, y = pop2, fill = neg_log10)) +
+  scale_fill_gradient(low = "#BAD4C9", high = "#274739") + #low is sig pval, darker color
+  scale_x_discrete(labels = c("Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "**Baining-Kagat**","**Baining-Mali**","Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz", "**Rennell-Bellona**", "Tikopia")) +
+  scale_y_discrete(labels = c("Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "**Baining-Kagat**","**Baining-Mali**","Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz", "**Rennell-Bellona**", "Tikopia")) +
+  theme_bw() +
+  labs(fill = expression(paste("Adjusted","-log10",~"p-value"))) +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 90, vjust = .5, hjust = 0.9, size = 8),
+        axis.text.y = ggtext::element_markdown(size = 8),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+
+OCN_total_NSEG_plot <- OCN_total_NSEG_df %>% ggplot() +
+  geom_raster(aes(x = pop1, y = pop2, fill = neg_log10)) +
+  scale_fill_gradient(low = "#BAD4C9", high = "#274739") + #low is sig pval, darker color
+  scale_x_discrete(labels = c("Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "**Baining-Kagat**","**Baining-Mali**","Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz", "**Rennell-Bellona**", "Tikopia")) +
+  scale_y_discrete(labels = c("Goroka-Sepik", "Kove", "Nakanai-Mangseng","Mamusi","Ata","Melamela", "**Baining-Kagat**","**Baining-Mali**","Lavongai-Mussau", "Nailik-Notsi-Tigak", "Nasioi", "Saposa", "Vella-Lavella", "Malaita", "Santa-Cruz", "**Rennell-Bellona**", "Tikopia")) +
+  labs(fill = expression(paste("Adjusted","-log10",~"p-value"))) +
+  theme_bw() +
+  theme(panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 90, vjust = .5, hjust = 0.9, size = 8),
+        axis.text.y = ggtext::element_markdown(size = 8),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 9))
+
+#arrange into one plot
+OCN_all_dunn_plot <- arrangeGrob(OCN_total_sumMB_plot, OCN_total_NSEG_plot, 
+             ncol = 2, widths = c(0.5, 0.5))
+
+#ggsave("./figures/OCN_all_dunn_plot.png", plot = OCN_all_dunn_plot, width = 14, height = 10, units = "cm")
+#ggsave("./figures/OCN_all_dunn_plot.pdf", plot = OCN_all_dunn_plot, width = 14, height = 10, units = "cm")
+```
