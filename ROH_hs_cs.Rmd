@@ -6,5 +6,280 @@ date: "2025-06-11"
 
 ### This file contains scripts and R code for identifying ROH hotspots and coldspots
 ```{r}
+library(ggplot2)
+library(gridExtra)
+library(ggsci)
+library(data.table)
+library(tidyverse)
+library(purrr)
+suppressPackageStartupMessages(library(karyoploteR))
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db) #required to add gene names, annotation for human genome
+library(rtracklayer)
+library(cowplot) #used to plot the separate plots into a composite
+library(ggplotify) #turns karyoploter objects into grobs so they can be combined
+library(ggtext)
+library(GenomicFeatures)
+library(txdbmaker)
+library(ggpubr)
+```
+
+To get hotspots and coldspots, we used bedtools genomecov.
+Since we were doing this on a regional basis, we first need to create per-region BEDfiles. These are used as input for bedtools genomecov
+
+### Create bedfiles
+Does not need to be run again after the first time.
+```{r}
+#create BED files for mapping to genome input
+#global sequences, split by region and creates dataframes in global environment
+global_no_centro_hom %>%
+  ungroup() %>%
+  dplyr::select(Region, CHR, POS1, POS2) %>%
+  mutate(POS1 = POS1-1) %>%  #subtract 1 from left pos for all BED files for correct format
+  arrange(CHR, POS1, POS2) %>% #arrange into ascending numerical order
+  as.data.frame() %>%
+  group_split(Region) %>%             #split by population into a list
+  map(~.x %>% dplyr::select(-Region)) %>%    #remove the population column for BED format
+  map(~.x %>% `colnames<-`(c('chrom', 'chromStart', 'chromEnd'))) %>%  #add colnames to all objects in list
+  setNames(paste0(unique(str_sort(global_MAF_LD_no_centro_hom$Region)), "_global_split")) %>%
+  list2env(envir = globalenv())
+
+#check to make sure the regions are correct, same number of rows
+print(global_no_centro_hom %>%
+        filter(Region == "Africa") %>%
+        summarise(n()))
+
+#write to BED format
+write.table(Africa_global_split, "./BEDfiles/Africa_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(America_global_split, "./BEDfiles/America_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Europe_global_split, "./BEDfiles/Europe_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Central_South_Asia_global_split, "./BEDfiles/Central_South_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(East_Asia_global_split, "./BEDfiles/East_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Middle_East_global_split, "./BEDfiles/Middle_East_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Island_Southeast_Asia_global_split, "./BEDfiles/Island_Southeast_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Oceania_global_split, "./BEDfiles/Oceania_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+### genomecov script
+```{bash}
+#!/bin/bash
+
+bedfile=$1
+genomefile=$2
+
+# genome file provides chromosome lengths, -bga for intervals including 0 coverage areas
+bedtools genomecov -i ${bedfile} -g ${genomefile} -bga
+
+```
+
+### genomecov wrapper, used in conjunction with above chunk
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=genome_cov_Oceania
+#SBATCH --time=2:00:00
+#SBATCH --mem-per-cpu=10MB
+#SBATCH --mail-type=ALL
+#SBATCH --output=Oceania_all_pops_ROH_out
+
+module load BEDtools
+
+#input
+# 1: region specific BED file with individual level ROH calls
+# 2: genome file for hs37d5 genome build
+
+#output
+# region specific BEDGRAPH files 
+./genomecov.sh ./BEDfiles/[input_file]_ROH_500kb.bed hs37d5.genome
+
+```
+
+Read in bedgraph files
+```{r}
+#metadata file containing sampleIDs, Region, Population information
+#contaminated/related/etc. individuals have been excluded from this metadata file
+#Vanuatu was already removed in the MAF and LD pruning step in PLINK, but this is just an extra step to make sure
+metadata <- read.table("./[filename].tsv", sep = "\t", header = TRUE, fill = TRUE) %>%
+  filter(Island != "Vanuatu" ) %>%
+  dplyr::select(SampleID, Region, Population, Island)
+
+# get number of individuals per region
+ind_per_region_global <- metadata %>%
+  dplyr::select(-Island) %>%
+  group_by(Region) %>%
+  summarise(n())
+
+Africa_bg <- read.table("bedgraph_output/500kb_noVanuatu/Africa_ROH_500kb_bg.tsv") 
+Africa_bg_mod <- Africa_bg %>%   
+  filter(V1 %in% 1:22) %>%          #filter out just the autosomal
+  mutate(V1 = as.numeric(V1)) %>%   #make sure its numeric
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%  #add row so that the final value is the end of chr22 in column 3 since we'll erase column 3 later (no gaps from row to row so this works)
+  mutate(Region = "Africa")         #add region name for grouping later
+
+Europe_bg <- read.table("bedgraph_output/500kb_noVanuatu/Europe_ROH_500kb_bg.tsv") 
+Europe_bg_mod <- Europe_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "Europe")
+
+EA_bg <- read.table("bedgraph_output/500kb_noVanuatu/East_Asia_ROH_500kb_bg.tsv")
+EA_bg_mod <- EA_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "East_Asia")
+
+ISEA_bg <- read.table("bedgraph_output/500kb_noVanuatu/Island_Southeast_Asia_ROH_500kb_bg.tsv")
+ISEA_bg_mod <- ISEA_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "Island_Southeast_Asia")
+
+CSA_bg <- read.table("bedgraph_output/500kb_noVanuatu/Central_South_Asia_ROH_500kb_bg.tsv")
+CSA_bg_mod <- CSA_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "Central_South_Asia")
+
+Middle_East_bg <- read.table("bedgraph_output/500kb_noVanuatu/Middle_East_ROH_500kb_bg.tsv")
+Middle_East_bg_mod <- Middle_East_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "Middle_East")
+
+America_bg <- read.table("bedgraph_output/500kb_noVanuatu/America_ROH_500kb_bg.tsv")
+America_bg_mod <- America_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "America")
+
+Oceania_bg <- read.table("bedgraph_output/500kb_noVanuatu/Oceania_ROH_500kb_bg.tsv")
+Oceania_bg_mod <- Oceania_bg %>%
+  filter(V1 %in% 1:22) %>% 
+  mutate(V1 = as.numeric(V1)) %>%
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
+  mutate(Region = "Oceania")
+
+#bind global dataframes together, alphabetical order
+global_bg_mod <- rbind(Africa_bg_mod,
+                       America_bg_mod,
+                       CSA_bg_mod,
+                       EA_bg_mod,
+                       Europe_bg_mod,
+                       ISEA_bg_mod,
+                       Middle_East_bg_mod,
+                       Oceania_bg_mod)
+
+#to normalize divide number of calls by total individuals for ROH frequency
+
+#check that centromeres are not in bedgraph just in case 
+centromere_bedgraph <- centromere_bed %>%
+   filter(CHR != c("X", "Y")) %>%
+  mutate(CHR = as.numeric(CHR), 
+         centro_POS1 = as.numeric(centro_POS1), 
+         centro_POS2 = as.numeric(centro_POS2))
+
+#add in the population sizes
+#currently hard coded
+global_bg_freq <- global_bg_mod %>%
+  mutate(ROH_freq = case_when(Region == "Africa" ~ V4/as.numeric(ind_per_region_global[1,2]),
+                              Region == "America" ~ V4/as.numeric(ind_per_region_global[2,2]),
+                              Region == "Central_South_Asia" ~ V4/as.numeric(ind_per_region_global[3,2]),
+                              Region == "East_Asia" ~ V4/as.numeric(ind_per_region_global[4,2]),
+                              Region == "Europe" ~ V4/as.numeric(ind_per_region_global[5,2]),
+                              Region == "Island_Southeast_Asia" ~ V4/as.numeric(ind_per_region_global[6,2]),
+                              Region == "Middle_East"~ V4/as.numeric(ind_per_region_global[7,2]),
+                              Region == "Oceania"~ V4/as.numeric(ind_per_region_global[8,2])
+                              )) %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2', 
+                 'ind_calls', 'Region', 'ROH_freq')) %>%
+  mutate(POS1 = POS1+1) #since BED is 0-based and we want 1 based
+
+global_bg_freq$Region <- factor(global_bg_freq$Region, levels = global_region_levels)
+
+
+```
+
+### Identify top hotspots per region
+Filter the full bedgraph table by the 1% region-specific threshold for each region separately. Merge any contiguous regions and apply 500Kb filter.
+
+```{r}
+
+
+```
+
+
+### Plot hotspots and coldspots genome-wide
+```{r}
+#custom karyoplot requires GRanges object, using df with CHR, Start, and End pos for each chromosome
+OCN_genome <- toGRanges(data.frame(chr = 1:22, 
+                                   start = rep(0, times = 22),
+                                   end = c(249250621, 243199373, 198022430,
+                                           191154276, 180915260, 171115067,
+                                           159138663, 146364022, 141213431, 
+                                           135534747, 135006516, 133851895,
+                                           115169878, 107349540, 102531392,
+                                           90354753, 81195210, 78077248,
+                                           59128983, 63025520, 48129895, 51304566)))
+
+
+#use kpPlotDensity to plot the ROH freq for OCN
+
+#ROH hotspots merged
+OCN_plot_top0.01 <- read.table("./data_files/ROH_500Kb_top0.01_16_hg19.tsv", header = FALSE, sep = "\t") %>%
+  `colnames<-`(c("CHR", "POS1", "POS2")) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001)
+
+ROH_top0.01 <- toGRanges(data.frame(chr = OCN_plot_top0.01$CHR,
+                                   start = OCN_plot_top0.01$POS1,
+                                   end = OCN_plot_top0.01$POS2))
+  
+
+OCN_plot_lower0.01 <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", header = FALSE, sep = "\t") %>%
+  `colnames<-`(c("CHR", "POS1", "POS2")) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001)
+
+ROH_lower0.01 <- toGRanges(data.frame(chr = OCN_plot_lower0.01$CHR,
+                                   start = OCN_plot_lower0.01$POS1,
+                                   end = OCN_plot_lower0.01$POS2))
+
+#masked regions
+masked_region <- read.table("../data_files/hs37d5_assembly_gaps.bed", header = FALSE, sep = "\t") %>%
+  filter(V1 %in% 1:22)
+masked_GRange <- toGRanges(masked_region)
+
+
+# plot with karyoploter
+pdf(file = "../figures/Fig3_OCN_hotspots_500kb_kp_final.pdf", width = 5.5, height = 3.9) 
+ 
+#plot shell genome
+OCN_kp <- plotKaryotype(genome = OCN_genome, plot.type = 6, main = "", chromosomes="all")
+#change background color
+kpDataBackground(OCN_kp, color = "white")
+#add bars
+kpPlotRegions(OCN_kp, data = ROH_top0.01,
+              col = "#e85d75", border = "#e85d75", 
+              avoid.overlapping = FALSE, r1 = 1,
+              data.panel="ideogram")
+kpPlotRegions(OCN_kp, data = ROH_lower0.01,
+              col = "#454372", border = "#454372", 
+              avoid.overlapping = FALSE, r1 = 1,
+              data.panel="ideogram")
+kpPlotRegions(OCN_kp, data = masked_GRange,
+              col = "grey", border = "NA",
+              avoid.overlapping = FALSE,
+              data.panel = "ideogram")
+ legend(x = "bottomright", 
+        fill = c("#e85d75", "#454372"), 
+        legend = c("ROH Hotspots (top 1% frequency)", 
+                   "ROH Coldspots (0% frequency)"),
+        bty = "o")
+dev.off()
 
 ```
