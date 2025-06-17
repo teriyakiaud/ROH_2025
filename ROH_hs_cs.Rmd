@@ -96,7 +96,7 @@ module load BEDtools
 
 Read in region specific BEDGRAPH files after genomecov
 ```{r}
-#metadata file containing sampleIDs, Region, Population information
+#metadata file containing sampleIDs, Region, Population information (NOT PROVIDED)
 #contaminated/related/etc. individuals have been excluded from this metadata file
 #Vanuatu was already removed in the MAF and LD pruning step in PLINK, but this is just an extra step to make sure
 metadata <- read.table("./[filename].tsv", sep = "\t", header = TRUE, fill = TRUE) %>%
@@ -259,6 +259,7 @@ OCN_cs <- OCN_cs[1:nrow(OCN_cs)-1, ]
 ```
 
 Merge the contiguous hs and cs regions that pass thresholds
+
 ```{bash}
 #!/bin/bash
 #SBATCH --job-name=merge_bed
@@ -267,20 +268,26 @@ Merge the contiguous hs and cs regions that pass thresholds
 #SBATCH --mail-type=ALL
 #SBATCH --output=Oceania_all_merge_out
 
-bedtools merge -i ./data_files/OCN_hs.bed > ./data_files/Oceania_hs_mergedInt.bed
-bedtools merge -i ./data_files/OCN_cs.bed > ./data_files/Oceania_cs_mergedInt.bed
+#hotspots
+bedtools merge -i ./data_files/OCN_hs.bed > ./data_files/OCN_hs_mergedInt.bed
+
+#coldspots
+#remove any regions that overlap gaps for the coldspots
+bedtools intersect -a ./data_files/OCN_cs.bed -b ./data_files/h37d5_assembly_gaps.bed -v > ./data_files/OCN_cs_noGaps_temp.bed
+
+bedtools merge -i ./data_files/OCN_cs_noGaps_temp.bed > ./data_files/OCN_cs_mergedInt.bed
 
 ```
 
 Filter for 500Kb length minimum. This removes spurious regions that appeared that might be over the frequency threshold but very short. This creates the final set of hotspots and coldspots.
 ```{r}
-#final output 16 merged hs
-hs_mergedInt <- read.table("./data_files/Oceania_hs_mergedInt.bed") %>%
+#final output of merged hs
+hs_mergedInt <- read.table("./data_files/OCN_hs_mergedInt.bed") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
   mutate(POS1 = POS1+1) #need to add one to match coords back from BED format
    
-#final output 19 merged cs
-cs_mergedInt <- read.table("./data_files/Oceania_cs_mergedInt.bed") %>%
+#final output of merged cs
+cs_mergedInt <- read.table("./data_files/OCN_cs_mergedInt.bed") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
   mutate(POS1 = POS1+1)
 
