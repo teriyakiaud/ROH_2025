@@ -1,0 +1,603 @@
+---
+title: "GTEx_eQTL_intersect"
+output: html_document
+date: "2025-06-17"
+---
+
+### This file contains R and bash code for overlapping GTEx eQTL eGenes with the ROH hotspots and coldspots
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(genekitr)
+suppressPackageStartupMessages(library(karyoploteR))
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db) #required to add gene names, annotation for human genome
+library(GenomicRanges)
+library(rtracklayer)
+library(Repitools)
+
+```
+
+#### Overlap ROH hs and cs with GTEx eGenes files (v8) 
+
+Read in hotspots and coldspots. Since coordinates are in hg19 space, they have to first be lifted over to hg38 coordinates
+```{r}
+#chain file from UCSC
+UCSC_chain <- import.chain("./data_files/hg19ToHg38.over.chain")
+
+#hotspots in hg19
+ROH_top0.01_16 <- read.table("./data_files/ROH_500Kb_top0.01_16_hg19.tsv", sep = "\t", header = FALSE) %>%
+  `colnames<-`(c("CHR", "POS1", "POS2"))
+
+#liftover
+hs16_start_only19 <- toGRanges(data.frame(chr = ROH_top0.01_16$CHR,
+                                          start = ROH_top0.01_16$POS1))
+
+hs16_start_only38 <- liftOver(hs16_start_only19, UCSC_chain)
+hs16_start_only38 <- unlist(hs16_start_only38)
+hs16_start_only38_df <- data.frame(CHR = seqnames(hs16_start_only38),
+                                    POS1 = start(hs16_start_only38))
+
+
+hs16_end_only19 <- toGRanges(data.frame(chr = ROH_top0.01_16$CHR,
+                                    start = ROH_top0.01_16$POS2))
+
+hs16_end_only38 <- liftOver(hs16_end_only19, UCSC_chain)
+hs16_end_only38 <- unlist(hs16_end_only38)
+hs16_end_only38_df <- data.frame(CHR = seqnames(hs16_end_only38),
+                                    POS1 = start(hs16_end_only38))
+
+hs16_all38 <- data.frame(seqnames = hs16_start_only38_df$CHR, 
+                            start = hs16_start_only38_df$POS1, 
+                            end = hs16_end_only38_df$POS1)
+
+write.table(hs16_all38, "./data_files/ROH_500Kb_top0.01_16_hg38.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+
+#coldspots in hg19
+ROH_lower0.01_19 <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", sep = "\t", header = FALSE) %>%
+  `colnames<-`(c("CHR", "POS1", "POS2"))
+
+#liftover
+cs19_start_only19 <- toGRanges(data.frame(chr = ROH_lower0.01_19$CHR,
+                                          start = ROH_lower0.01_19$POS1))
+
+cs19_start_only38 <- liftOver(cs19_start_only19, UCSC_chain)
+cs19_start_only38 <- unlist(cs19_start_only38)
+cs19_start_only38_df <- data.frame(CHR = seqnames(cs19_start_only38),
+                                    POS1 = start(cs19_start_only38))
+
+
+cs19_end_only19 <- toGRanges(data.frame(chr = ROH_lower0.01_19$CHR,
+                                    start = ROH_lower0.01_19$POS2))
+
+cs19_end_only38 <- liftOver(cs19_end_only19, UCSC_chain)
+cs19_end_only38 <- unlist(cs19_end_only38)
+cs19_end_only38_df <- data.frame(CHR = seqnames(cs19_end_only38),
+                                    POS1 = start(cs19_end_only38))
+
+cs19_all38 <- data.frame(seqnames = cs19_start_only38_df$CHR, 
+                            start = cs19_start_only38_df$POS1, 
+                            end = cs19_end_only38_df$POS1)
+
+write.table(cs19_all38, "./data_files/ROH_500Kb_lower0.01_19_hg38.tsv", sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+```
+
+#### Intersect with the GTEx files downloaded from GTEx portal 
+
+GTEx portal: (https://www.gtexportal.org/home/downloads/adult-gtex/qtl)
+
+Hotspot version, output files are available in eQTL_overlap_500Kb
+```{r}
+#!/usr/bin/env Rscript
+
+#load libraries
+library(tidyverse)
+library(doParallel)
+library(data.table)
+library(foreach)
+
+#set cores to run in parallel
+cores <- 10
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+#list of files to run this one
+#path should lead to the directory where GTEx eGenes files are found
+temp <- list.files(path = "./GTEx_Analysis_v8_eQTL/", 
+			pattern = "*.v8.egenes.txt.gz", full.names = TRUE)
+
+# function that will run on each of the files
+# ROH_bgfile has to be changed depending on whether overlapping hs or cs
+process_fun <- function(file_input) {
+  gtexfile <- read.table(file_input, sep = "\t", header = TRUE) # GTEx egenes tissue file, tab sep
+  ROH_bgfile <- read.table("./data_files/ROH_500Kb_top0.01_16_hg38.tsv", sep = "\t", header = TRUE) # tsv file with coordinates for hotspots in the top 1% freq distribution
+  outprefix <- gsub(pattern = ".egenes.txt.gz", "", basename(file_input))
+
+  gtex_qval0.05 <- gtexfile %>%
+  dplyr::select(gene_id, gene_name, chr, 
+                variant_pos, ref, alt, rs_id_dbSNP151_GRCh38p7, num_alt_per_site, slope, qval, log2_aFC) %>% # select relevant columns
+  filter(qval <= 0.05 & num_alt_per_site == 1)  # filter only the "significant" rows by filtering on qval and only biallelic (refer to GTEx website methods for descrip on this value)
+  
+  intersect <- gtex_qval0.05 %>%   # merge with the coordinate file
+  left_join(x = ., y = ROH_bgfile,
+            by = c("chr" = "seqnames")) %>%
+  filter(variant_pos > start & variant_pos <= end) # filter variant positions that intersect the hotspot coordinates
+						   # eGenes files are 1-based coords, bg file is 0 based so use variant_pos > start instead of >= 
+
+  write.table(intersect, 
+  file = paste0("./eQTL_overlap_500Kb/hs16/", outprefix, "_egenes_hs16_500Kb_RefAlt.tsv"), 
+  sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+}
+
+#run a forloop for all of the files with the correct suffix using the function above in parallel
+foreach(i = 1:length(temp), .packages = c("tidyverse", "doParallel", "data.table", "foreach")) %dopar% {
+  process_fun(temp[[i]])
+}
+
+#this ends the parallel run
+stopCluster(cl)
+
+```
+
+coldspot version, output files are available in eQTL_overlap_500Kb
+```{r}
+#!/usr/bin/env Rscript
+
+#load libraries
+library(tidyverse)
+library(doParallel)
+library(data.table)
+library(foreach)
+
+#set cores to run in parallel
+cores <- 10
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+#list of files to run this one
+#path should lead to the directory where GTEx eGenes files are found
+temp <- list.files(path = "./GTEx_Analysis_v8_eQTL/", 
+			pattern = "*.v8.egenes.txt.gz", full.names = TRUE)
+
+# function that will run on each of the files
+# ROH_bgfile has to be changed depending on whether overlapping hs or cs
+process_fun <- function(file_input) {
+  gtexfile <- read.table(file_input, sep = "\t", header = TRUE) # GTEx egenes tissue file, tab sep
+  ROH_bgfile <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg38.tsv", sep = "\t", header = TRUE) # tsv file with coordinates for hotspots in the top 1% freq distribution
+  outprefix <- gsub(pattern = ".egenes.txt.gz", "", basename(file_input))
+
+  gtex_qval0.05 <- gtexfile %>%
+  dplyr::select(gene_id, gene_name, chr, 
+                variant_pos, ref, alt, rs_id_dbSNP151_GRCh38p7, num_alt_per_site, slope, qval, log2_aFC) %>% # select relevant columns
+  filter(qval <= 0.05 & num_alt_per_site == 1)  # filter only the "significant" rows by filtering on qval and only biallelic (refer to GTEx website methods for descrip on this value)
+  
+  intersect <- gtex_qval0.05 %>%   # merge with the coordinate file
+  left_join(x = ., y = ROH_bgfile,
+            by = c("chr" = "seqnames")) %>%
+  filter(variant_pos > start & variant_pos <= end) # filter variant positions that intersect the hotspot coordinates
+						   # eGenes files are 1-based coords, bg file is 0 based so use variant_pos > start instead of >= 
+
+  write.table(intersect, 
+  file = paste0("./eQTL_overlap_500Kb/cs19/", outprefix, "_egenes_0.01cs_500Kb_RefAlt.tsv"), 
+  sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+}
+
+#run a forloop for all of the files with the correct suffix using the function above in parallel
+foreach(i = 1:length(temp), .packages = c("tidyverse", "doParallel", "data.table", "foreach")) %dopar% {
+  process_fun(temp[[i]])
+}
+
+#this ends the parallel run
+stopCluster(cl)
+
+```
+
+Wrapper script to be used with the two scripts above
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=GTEx_hs_filter
+#SBATCH --time=1:00:00
+#SBATCH --mem-per-cpu=8GB
+#SBATCH --mail-type=ALL
+#SBATCH --output=GTEx_hs_filter_log
+
+# modules
+R="R/4.3.2-foss-2022b" #this is the version on the cluster
+
+#load modules
+module load ${R}
+
+#Rscript GTEx_filter_gen_parallel_{eQTL}.R
+Rscript GTEx_filter_gen_parallel_eQTL.R
+
+```
+
+To run gene set enrichment analyses later, we also need a set of background genes consisting of any eQTLs that are found in ANY ROH in Near Oceanic populations.
+
+First, get we need per sample ROH files, which are taken from the original PLINK output. Run with wrapper script in the chunk below.
+```{awk}
+#!/bin/awk -f
+#This script takes a PLINK .hom file from ROH analysis as input and
+# outputs a bunch of BED files, one per sample found in the .hom file,
+# containing the ROH tracts for that sample. This can then be used
+# to calculate the average DP along each ROH tract.
+BEGIN{
+   OFS="\t";
+   if (length(outprefix) == 0) {
+      print "Missing outprefix, please provide it. Quitting." > "/dev/stderr";
+      exit 2;
+   };
+}
+NR==1{
+   for (i=1; i<=NF; i++) {
+      cols[$i]=i;
+   };
+}
+NR>1{
+   print $cols["CHR"], $cols["POS1"]-1, $cols["POS2"], $cols["IID"] > outprefix"_"$cols["IID"]"_ROH.bed";
+}
+
+```
+
+Wrapper to be used with chunk above. Outputs per sample files
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PLINK_hom_split
+#SBATCH --time=10:00
+#SBATCH --mem-per-cpu=1GB
+#SBATCH --mail-type=ALL
+#SBATCH --output=PLINK_hom_split_log
+
+# will break up the hom file into one file per individual
+# 
+# Output prefix is 2nd field
+# Input PLINK .hom file is the 3rd field
+PLINKhomToBEDs.awk -v "outprefix=./data_files/individual_ROH/PIBv1_noVanuatu" ./data_files/[filename].hom
+
+#write all file names to a text file
+ls ./data_files/individual_ROH/PIBv1_noVanuatu* > individual_ROH_filenames.txt
+#grep just the Near Oceanic sample IDs
+grep -Ff PIBv1_OCN_samps.txt individual_ROH_filenames.txt > OCN_individual_ROH_filenames.txt
+```
+
+Liftover individual files to hg38 coordinates to match GTEx files
+```{r}
+#!/usr/bin/env Rscript
+
+library(tidyverse)
+library(rtracklayer)
+library(stringr)
+library(GenomicRanges)
+library(regioneR)
+
+#chain file from UCSC
+UCSC_chain <- import.chain("./data_files/hg19ToHg38.over.chain")
+
+list_names <- str_replace(list.files(path = "./data_files/individual_ROH/",
+           pattern = "PIBv1_noVanuatu_*",
+           full.names = FALSE),
+           pattern = ".bed", "") #should read in the file names and replace the .bed with a blank
+
+
+full_list <- list.files(path = "./data_files/individual_ROH/",
+                        pattern = "PIBv1_noVanuatu_*",
+                        full.names = TRUE) %>%
+  map(~read.csv(., header = FALSE,
+                comment.char = "",
+                sep = "\t",
+                check.names = FALSE)) %>%
+  `names<-`(list_names) %>%
+  map(~.x %>% `colnames<-`(c("CHR", "POS1", "POS2", "IID"))) %>%
+  map(~.x %>% mutate(CHR = paste0("chr", CHR),
+                     POS1 = POS1 + 1))
+
+#forloop runs through the full list
+for (i in names(full_list)){
+  i_Gr <- toGRanges(data.frame(chr = full_list[[i]]$CHR,
+                               start = full_list[[i]]$POS1, 
+                               end = full_list[[i]]$POS2))
+
+  i_38 <- liftOver(i_Gr, UCSC_chain)
+  i_38 <- unlist(i_38)
+  i_38_df <- data.frame(seqnames = seqnames(i_38),
+                        start = start(i_38),
+                        end = end(i_38))
+
+  write.table(i_38_df, paste0("./data_files_individual_ROH_hg38/", i, ".tsv"), sep = "\t",
+                               col.names = TRUE, row.names = FALSE, quote = FALSE)
+}
+
+```
+
+
+CONTINUE HERE 6/17
+
+
+Next, we overlap each individual sample ROH file with the GTEx eQTL files. Run with wrapper script in the chunk below.
+```{r}
+#!/usr/bin/env Rscript
+
+#load libraries
+library(tidyverse)
+library(doParallel)
+library(data.table)
+library(foreach)
+
+#set cores to run in parallel
+cores <- 10
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+#set up command line args to read in the files in the wrapper sh script
+args <- commandArgs(TRUE)
+
+#list of files to run this one
+temp <- list.files(path = "../GTEx_Analysis_v8_eQTL/",
+                        pattern = "*.v8.egenes.txt.gz", full.names = TRUE)
+temp_list <- list()
+# function that will run on each of the files
+process_fun <- function(file_input) {
+  gtexfile <- read.table(file_input, sep = "\t", header = TRUE) # GTEx egenes tissue file, tab sep
+  ROH_bgfile <- read.table(args[1], sep = "\t", header = TRUE) # individual ROH calls
+
+  gtex_qval0.05 <- gtexfile %>%
+  dplyr::select(gene_name, chr, variant_pos, num_alt_per_site, qval) %>% # select relevant columns
+  filter(qval <= 0.05 & num_alt_per_site == 1)  # filter only the "significant" rows by filtering on qval and only biallelic (refer to$
+
+  intersect <- gtex_qval0.05 %>%   # merge with the coordinate file
+  left_join(x = ., y = ROH_bgfile,
+            by = c("chr" = "seqnames")) %>%
+  filter(variant_pos > start & variant_pos <= end) # filter variant positions that intersect the hotspot coordinates 
+  # eGenes files are 1-based coords, bg file is 0 based so use variant_pos > start instead of >=# eGenes files are 1-based coords, bg file is 0 based so use variant_pos > start in$
+
+  print(intersect)
+}
+
+#run a forloop for all of the files with the correct suffix using the function above in parallel
+temp_list <- foreach(i = 1:length(temp), .packages = c("tidyverse", "doParallel", "data.table", "foreach")) %dopar% {
+  process_fun(temp[[i]])
+}
+
+full_list <- temp_list %>%
+        map(~.x %>% unite(., "key", gene_name, chr, variant_pos, sep = ":", remove = FALSE))
+
+col <- c("key", "chr", "variant_pos", "gene_name")
+gene <- "gene_name"
+
+df_rownames <- lapply(full_list, "[", col) %>% #takes all rows ('[') and specifies columns in "col" vector
+               list_rbind(.) %>% #rbind into one long column
+               distinct(key, .keep_all = TRUE)
+
+df_genes <- lapply(full_list, "[", gene) %>% #takes all rows ('[') and specifies columns in "gene" vector
+               list_rbind(.) %>% #rbind into one long column
+               distinct(gene_name, .keep_all = TRUE)
+
+#distinct based on the gene:chr:pos column (this has all unique eQTLs and their gene targets, but could be repeats of genes)
+write.table(df_rownames, file = paste0(args[2]), sep = "\t",
+        row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+#distinct based on gene column only (should be smaller, this is the background set of genes)
+write.table(df_genes, file = paste0(args[3]), sep = "\t",
+        row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+#this ends the parallel run
+stopCluster(cl)
+
+```
+
+Wrapper script to be used with script in chunk above
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=OCN_GTEx_hs_filter
+#SBATCH --time=12:00:00
+#SBATCH --mem-per-cpu=10GB
+#SBATCH --cpus-per-task=10
+#SBATCH --mail-type=ALL
+#SBATCH --output=OCN_GTEx_hs_filter_log
+
+# modules
+R="R/4.3.2-foss-2022b" #this is the version on the cluster
+
+#load modules
+module load ${R}
+
+#the order of file names has to be in the same order at in the filenames.txt file
+
+index=1
+while read -r i; do
+
+Rscript GTEx_filter_gen_parallel_eQTL.R ${i} ./indROH_eQTL_overlap/OCN_only/PIBv1_noVanuatu_${index}_eQTL_backgroundALL.tsv ./indROH_eQTL_overlap/backgr$
+((index++))
+done < OCN_individualROH_filenames.txt  #this input txt is a list of tsv files with ROH calls for each Near Oceanic individual 
+
+
+```
+
+
+#### Necessary files for overlap in R
+```{r}
+#metadata file containing sampleIDs, Region, Population information (NOT PROVIDED)
+#contaminated/related/etc. individuals have been excluded from this metadata file
+#Vanuatu was already removed in the MAF and LD pruning step in PLINK, but this is just an extra step to make sure
+metadata <- read.table("./[filename].tsv", sep = "\t", header = TRUE, fill = TRUE) %>%
+  filter(Island != "Vanuatu" ) %>%
+  dplyr::select(SampleID, Region, Population, Island)
+
+#background set of genes for eQTL analysis in enrichr
+background_eQTLs <- read.table("data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_distinct.tsv", header = TRUE)
+
+# txdb file with UCSC genes
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+columns(txdb)
+keytypes(txdb)
+
+#org db with gene annots
+org <- org.Hs.eg.db
+columns(org)
+keytypes(org)
+```
+
+Read in the intersected eQTL files
+```{r}
+#vector of names that correspond to the tables we are reading in
+#since we use the same list.files function, the order should be the same
+eQTL_df_names <- list.files(path = "./data_files/eQTL_intersect_output/500Kb/hs16/",
+                            pattern = "*.v8_egenes_hs16_500Kb_RefAlt",
+                            full.names = FALSE)
+
+#read in the tables to a large list
+eQTL_df_list <- list.files(path = "./data_files/eQTL_intersect_output/500Kb/hs16/",
+                            pattern = "*.v8_egenes_hs16_500Kb_RefAlt",
+                            full.names = TRUE) %>%
+                 map(~read.csv(., header = TRUE, 
+                                    comment.char = "", 
+                                    sep = "\t",
+                                    check.names = FALSE)) %>%
+                 `names<-`(eQTL_df_names) %>%                        #add names to the tables in the list  #remove unneeded columns from each dataframe
+                 map(~.x %>% unite(., "key",                          #create key col with gene/chr/variant_pos 
+                                   gene_name, chr, variant_pos,  
+                                   sep = ":", remove = FALSE))
+
+#get the names of all possible gene/chr/var_pos keys across all tissue tables as a vector to become rownames
+key <- "key"
+col <- c("key", "chr", "variant_pos", "ref", "alt", "log2_aFC", "slope")
+
+
+#distinct by key
+df_rownames <- lapply(eQTL_df_list, "[", col) %>%  #takes all rows ('[') and specifies columns in "key" vector
+                list_rbind(.) %>%                        #rbind into one long column
+                distinct(key, .keep_all = TRUE)     #keep distinct rows only, no duplicates
+#                filter(nchar(ref) == 1 & nchar(alt) == 1)
+                # unite(., "chr_key", chr, variant_pos) %>%
+                # distinct(chr_key)
+
+#biallelic filtered
+df_rownames_biallele <- df_rownames %>%
+              filter(nchar(ref) == 1 & nchar(alt) == 1)
+  
+
+
+df_colnames <- eQTL_df_names %>%
+                str_extract(., "^[^\\.]*")  #takes just the tissue name (before the "." in the file name)
+                                            #in the same order as the tissue list so 1st col=1st table in the list
+
+tissue_df <- data.frame(matrix(nrow = length(df_rownames$key),  #create empty dataframe
+                         ncol = length(df_colnames)),
+                         row.names = df_rownames$key) %>%
+              `colnames<-`(df_colnames) %>%      #add correct tissue names
+              replace(is.na(.), 0)                #start every cell with 0
+
+```
+
+Create a presence-absence matrix to see which genes are expressed in which tissues and pull out unique gene names
+```{r}
+#Part 1:
+#function to create presence absence of gene per tissue type
+#Input: tissue dataframe (empty), vector of gene/key names, column index to fill
+#Output: vector of row indexes where gene/key name matched a row, in dataframe format
+
+update_df <- function(df, vector, col_index){
+  row_index <- c()      #set up empty vector
+  for (k in vector){    #forloop fills empty vector with matching row indexes
+    if (k %in% row.names(df)){     #if key matches rowname in tissue df (also a key), then write index to row_index
+      row_index[k] <- which(row.names(df) == k)
+        }
+  row_index          
+  df[row_index[k], col_index] <- df[row_index[k], col_index] + 1    #add a 1 to the appropriate cell, col_index will match the tissue type as columns are different tissues, row matches gene/key name
+  }                                                                 #output is 0 if no match, 1 if match per column (should be NO values greater than 1 per col)
+  return(as.data.frame(df[,col_index]))                             #return as a dataframe
+}
+
+
+
+#Part 2:
+#forloop runs through each element in eQTL_df_list and updates the empty tissue dataframe using the update_df function
+
+#Input: empty tissue dataframe, key column from each tissue dataframe in the eQTL_df_list (49 total here)
+#Output: filled tissue dataframe as a presence-absence matrix of 0s and 1s
+
+for (i in 1:length(eQTL_df_list)) {     #length of eQTL_df_list is the number of tissues
+  tissue_df[,i] <- update_df(tissue_df, eQTL_df_list[[i]]$key, i)  #match up the tissue in eQTL_df_list with its corresponding column in tissue_df
+                                                                   #replace with the filled column of 0s and 1s for matching keys from update_df output
+}
+
+#final presence-absence matrix
+sum_df <- tissue_df %>% mutate(sum = rowSums(.)) %>%
+  relocate(sum, .before = Adipose_Subcutaneous)
+
+#add col of gene names to sum_df, gene names will be associated with the unique keys to filter specific rows of interest
+sum_df_gene <- sum_df %>%
+  rownames_to_column(var = "key") %>%
+  mutate(gene_name = str_extract(.$key, "^[^\\:]*")) %>% #takes just the tissue name (before the ":" in the file name
+  relocate(gene_name, .before = sum)
+
+#get list of unique gene names, 
+all_genes_unique <- unique(sum_df_gene$gene_name)
+
+#get list of unique gene IDs, 
+all_IDs_unique <- lapply(eQTL_df_list, "[", "gene_id") %>%  #takes all rows ('[') and specifies columns
+                list_rbind(.) %>%                        #rbind into one long column
+                distinct()
+
+#convert gene IDs to symbols and check that symbols are consistent and up-to-date (gene symbols 'sym' are HGNC symbols)
+#check and transfer aliases
+gene_id_trans <- transId(all_IDs_unique$gene_id, transTo = "sym") 
+
+gene_alias_trans <- transId(gene_id_trans$symbol, transTo = "sym") #get any possible aliases for the genes from IDs
+
+gene_alias_trans_unique <- as.data.frame(unique(gene_alias_trans$symbol)) #all unique aliases
+```
+
+### Gene set enrichment analyses (hotspots)
+#### GSEA 1: Run enrichR for GO annotations for eQTL target genes (hotspots)
+Output from this GSEA is in Table S5
+```{r}
+library(enrichR)
+
+#connect to enrichR databases
+websiteLive <- getOption("enrichR.live")
+if (websiteLive) {
+#    listEnrichrSites()
+    setEnrichrSite("Enrichr") # Human genes   
+}
+
+#lists all databases
+#  if (websiteLive){ 
+#    dbs <- listEnrichrDbs()
+#    head(dbs)
+#  
+#  }
+# # 
+#  if (websiteLive) dbs 
+
+#using the most up-to-date (09/2024)
+dbs <- c("GO_Molecular_Function_2023", "GO_Biological_Process_2023", "GO_Cellular_Component_2023", "Reactome_Pathways_2024")
+if (websiteLive) {
+    enriched <- enrichr(gene_alias_trans_unique$`unique(gene_alias_trans$symbol)`, dbs, background = background_eQTLs$gene_name) #unique gene alias and background of all eQTLs found in an Oceanic ROH
+}
+
+#look at molecular function --> no sig
+GO_MF_eQTL_hs <- if (websiteLive) enriched[["GO_Molecular_Function_2023"]]
+
+#look at biological process --> sig = 0.0003094375 for B Cell receptor signaling pathway (Adj p.val)
+GO_BP_eQTL_hs <- if (websiteLive) enriched[["GO_Biological_Process_2023"]]
+
+# cell component --> no sig
+GO_CC_eQTL_hs <- if (websiteLive) enriched[["GO_Cellular_Component_2023"]]
+
+
+tables <- list(GO_MF_eQTL_hs, GO_BP_eQTL_hs, GO_CC_eQTL_hs)
+tables_names <- c("GO_MF_eQTL_hs", "GO_BP_eQTL_hs", "GO_CC_eQTL_hs")
+  
+tables <- tables %>%
+  `names<-`(tables_names) %>%
+  map(~.x %>% filter(Adjusted.P.value < 0.01)) #adjust p-value threshold of 0.01 for significance
+
+#output is found in Table S5
+for(i in 1:length(tables)){
+   write.table(tables[[i]], paste0("./tables/Supp5_", names(tables[i]), ".tsv"), sep = "\t", quote = FALSE,
+               row.names = FALSE, col.names = TRUE)
+ }
+
+```
