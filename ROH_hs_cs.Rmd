@@ -89,7 +89,7 @@ module load BEDtools
 
 #output
 # region specific BEDGRAPH files 
-./genomecov.sh ./BEDfiles/[input_file]_ROH_500kb.bed hs37d5.genome
+./genomecov.sh ./BEDfiles/[input_file]_ROH_500kb.bed ./data_files/hs37d5.genome
 
 ```
 
@@ -108,56 +108,56 @@ ind_per_region_global <- metadata %>%
   group_by(Region) %>%
   summarise(n())
 
-Africa_bg <- read.table("bedgraph_output/500kb_noVanuatu/Africa_ROH_500kb_bg.tsv") 
+Africa_bg <- read.table("./data_files/bedgraph/Africa_ROH_500kb_bg.tsv") 
 Africa_bg_mod <- Africa_bg %>%   
   filter(V1 %in% 1:22) %>%          #filter out just the autosomal
   mutate(V1 = as.numeric(V1)) %>%   #make sure its numeric
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%  #add row so that the final value is the end of chr22 in column 3 since we'll erase column 3 later (no gaps from row to row so this works)
   mutate(Region = "Africa")         #add region name for grouping later
 
-Europe_bg <- read.table("bedgraph_output/500kb_noVanuatu/Europe_ROH_500kb_bg.tsv") 
+Europe_bg <- read.table("./data_files/bedgraph/Europe_ROH_500kb_bg.tsv") 
 Europe_bg_mod <- Europe_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "Europe")
 
-EA_bg <- read.table("bedgraph_output/500kb_noVanuatu/East_Asia_ROH_500kb_bg.tsv")
+EA_bg <- read.table("./data_files/bedgraph/East_Asia_ROH_500kb_bg.tsv")
 EA_bg_mod <- EA_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "East_Asia")
 
-ISEA_bg <- read.table("bedgraph_output/500kb_noVanuatu/Island_Southeast_Asia_ROH_500kb_bg.tsv")
+ISEA_bg <- read.table("./data_files/bedgraph/Island_Southeast_Asia_ROH_500kb_bg.tsv")
 ISEA_bg_mod <- ISEA_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "Island_Southeast_Asia")
 
-CSA_bg <- read.table("bedgraph_output/500kb_noVanuatu/Central_South_Asia_ROH_500kb_bg.tsv")
+CSA_bg <- read.table("./data_files/bedgraph/Central_South_Asia_ROH_500kb_bg.tsv")
 CSA_bg_mod <- CSA_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "Central_South_Asia")
 
-Middle_East_bg <- read.table("bedgraph_output/500kb_noVanuatu/Middle_East_ROH_500kb_bg.tsv")
+Middle_East_bg <- read.table("./data_files/bedgraph/Middle_East_ROH_500kb_bg.tsv")
 Middle_East_bg_mod <- Middle_East_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "Middle_East")
 
-America_bg <- read.table("bedgraph_output/500kb_noVanuatu/America_ROH_500kb_bg.tsv")
+America_bg <- read.table("./data_files/bedgraph/America_ROH_500kb_bg.tsv")
 America_bg_mod <- America_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
   add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%
   mutate(Region = "America")
 
-Oceania_bg <- read.table("bedgraph_output/500kb_noVanuatu/Oceania_ROH_500kb_bg.tsv")
+Oceania_bg <- read.table("./data_files/bedgraph/Oceania_ROH_500kb_bg.tsv")
 Oceania_bg_mod <- Oceania_bg %>%
   filter(V1 %in% 1:22) %>% 
   mutate(V1 = as.numeric(V1)) %>%
@@ -197,18 +197,75 @@ global_bg_freq <- global_bg_mod %>%
                               )) %>%
   `colnames<-`(c('CHR', 'POS1', 'POS2', 
                  'ind_calls', 'Region', 'ROH_freq')) %>%
-  mutate(POS1 = POS1+1) #since BED is 0-based and we want 1 based
+  mutate(POS1 = POS1+1) %>% #since BED is 0-based and we want 1 based
+  right_join(centromere_bedgraph, ., by = "CHR") %>%     #keeps everything in global_bg_mod when merging
+  filter(POS1 > centro_POS2 | POS2 < centro_POS1+1) %>%  #filter out the centromeres since these should have 0 and masked
 
 global_bg_freq$Region <- factor(global_bg_freq$Region, levels = global_region_levels)
 
-
 ```
 
-### Identify top hotspots per region
+### Identify top hotspots and coldspots per region
 Filter the full bedgraph table by the 1% region-specific threshold for each region separately. Merge any contiguous regions and apply 500Kb filter.
 
 ```{r}
+#get hotspot top 1% threshold cutoffs for each region
+global_pop_q <- global_bg_freq %>%
+  filter(POS2 != 0) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001) %>%
+  group_by(Region) %>%
+  summarise(quantile(ROH_freq, 0.99))
 
+#get coldspot bottom 1% threshold cutoffs for each region
+global_pop_q_lower <- global_bg_freq %>%
+  filter(POS2 != 0) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001) %>%
+  group_by(Region) %>%
+  summarise(quantile(ROH_freq, 0.01))   #for OCN, limit is 0.017985612
+
+#get the 99th percentile hotspot coords in bed format for bedtools merge
+OCN_hs <- global_bg_freq %>%
+  filter(Region %in% "Oceania") %>%
+  filter(POS2 != 0) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001)  %>%     #Mb lengths
+  filter(ROH_freq <= 0.1762590) %>%
+  mutate(POS1 = POS1-1) %>%          #back to 0-based bed format
+  dplyr::select(CHR, POS1, POS2)
+
+#get the 1st percentile coldspot coords in bed format for bedtools merge
+OCN_cs <- global_bg_freq %>%
+  filter(Region %in% "Oceania") %>%
+  filter(POS2 != 0) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001)  %>%     #Mb lengths
+  filter(ROH_freq <= 0.017985612) %>%
+  mutate(POS1 = POS1-1) %>%          #back to 0-based bed format
+  dplyr::select(CHR, POS1, POS2)
+
+#remove the final row (this was used for any plotting but is actually just the last position of chr22 repeated)
+OCN_hs <- OCN_hs[1:nrow(OCN_hs)-1, ]
+OCN_cs <- OCN_cs[1:nrow(OCN_cs)-1, ]
+
+# write.table(OCN_hs, "./data_files/OCN_hs.bed", sep = "\t",
+#             quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# write.table(OCN_cs, "./data_files/OCN_cs.bed", sep = "\t",
+#             quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+```
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=genome_cov_Oceania
+#SBATCH --time=2:00:00
+#SBATCH --mem-per-cpu=10MB
+#SBATCH --mail-type=ALL
+#SBATCH --output=Oceania_all_pops_ROH_out
+
+bedtools merge -i ./data_files/bedgraph/Oceania_ROH_500kb_bg.tsv > ./data_files/Oceania_hs_mergedInt.bed
 
 ```
 
@@ -229,7 +286,7 @@ OCN_genome <- toGRanges(data.frame(chr = 1:22,
 
 #use kpPlotDensity to plot the ROH freq for OCN
 
-#ROH hotspots merged
+#final 16 ROH hotspots after merging and 500Kb length filter
 OCN_plot_top0.01 <- read.table("./data_files/ROH_500Kb_top0.01_16_hg19.tsv", header = FALSE, sep = "\t") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
   mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
@@ -239,7 +296,7 @@ ROH_top0.01 <- toGRanges(data.frame(chr = OCN_plot_top0.01$CHR,
                                    start = OCN_plot_top0.01$POS1,
                                    end = OCN_plot_top0.01$POS2))
   
-
+#final 19 coldspots
 OCN_plot_lower0.01 <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", header = FALSE, sep = "\t") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
   mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
