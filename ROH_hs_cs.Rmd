@@ -50,14 +50,14 @@ print(global_no_centro_hom %>%
         summarise(n()))
 
 #write to BED format
-write.table(Africa_global_split, "./BEDfiles/Africa_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(America_global_split, "./BEDfiles/America_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(Europe_global_split, "./BEDfiles/Europe_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(Central_South_Asia_global_split, "./BEDfiles/Central_South_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(East_Asia_global_split, "./BEDfiles/East_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(Middle_East_global_split, "./BEDfiles/Middle_East_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(Island_Southeast_Asia_global_split, "./BEDfiles/Island_Southeast_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(Oceania_global_split, "./BEDfiles/Oceania_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Africa_global_split, "./data_files/BEDfiles/Africa_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(America_global_split, "./data_files/BEDfiles/America_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Europe_global_split, "./data_files/BEDfiles/Europe_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Central_South_Asia_global_split, "./data_files/BEDfiles/Central_South_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(East_Asia_global_split, "./data_files/BEDfiles/East_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Middle_East_global_split, "./data_files/BEDfiles/Middle_East_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Island_Southeast_Asia_global_split, "./data_files/BEDfiles/Island_Southeast_Asia_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(Oceania_global_split, "./data_files/BEDfiles/Oceania_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
 ```
 
 ### genomecov script
@@ -66,9 +66,10 @@ write.table(Oceania_global_split, "./BEDfiles/Oceania_ROH_500kb.bed", sep = "\t"
 
 bedfile=$1
 genomefile=$2
+outprefix=$3
 
 # genome file provides chromosome lengths, -bga for intervals including 0 coverage areas
-bedtools genomecov -i ${bedfile} -g ${genomefile} -bga
+bedtools genomecov -i ${bedfile} -g ${genomefile} -bga > ${outprefix}
 
 ```
 
@@ -89,11 +90,11 @@ module load BEDtools
 
 #output
 # region specific BEDGRAPH files 
-./genomecov.sh ./BEDfiles/[input_file]_ROH_500kb.bed ./data_files/hs37d5.genome
+./genomecov.sh ./data_files/BEDfiles/[input_file]_ROH_500kb.bed ./data_files/hs37d5.genome ./data_files/bedgraph/[input_file]_ROH_500kb_bg.tsv
 
 ```
 
-Read in bedgraph files
+Read in region specific BEDGRAPH files after genomecov
 ```{r}
 #metadata file containing sampleIDs, Region, Population information
 #contaminated/related/etc. individuals have been excluded from this metadata file
@@ -112,7 +113,7 @@ Africa_bg <- read.table("./data_files/bedgraph/Africa_ROH_500kb_bg.tsv")
 Africa_bg_mod <- Africa_bg %>%   
   filter(V1 %in% 1:22) %>%          #filter out just the autosomal
   mutate(V1 = as.numeric(V1)) %>%   #make sure its numeric
-  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%  #add row so that the final value is the end of chr22 in column 3 since we'll erase column 3 later (no gaps from row to row so this works)
+  add_row(V1 = 22, V2 = .[nrow(.),3], V3 = .[nrow(.),3], V4 = 0) %>%  #add row so that the final value is the end of chr22 in column 3 since we'll erase column 3 later (no gaps from row to row so this works), just for plotting purposes
   mutate(Region = "Africa")         #add region name for grouping later
 
 Europe_bg <- read.table("./data_files/bedgraph/Europe_ROH_500kb_bg.tsv") 
@@ -184,7 +185,7 @@ centromere_bedgraph <- centromere_bed %>%
          centro_POS2 = as.numeric(centro_POS2))
 
 #add in the population sizes
-#currently hard coded
+#currently hard coded to match the right rows
 global_bg_freq <- global_bg_mod %>%
   mutate(ROH_freq = case_when(Region == "Africa" ~ V4/as.numeric(ind_per_region_global[1,2]),
                               Region == "America" ~ V4/as.numeric(ind_per_region_global[2,2]),
@@ -249,26 +250,46 @@ OCN_cs <- global_bg_freq %>%
 OCN_hs <- OCN_hs[1:nrow(OCN_hs)-1, ]
 OCN_cs <- OCN_cs[1:nrow(OCN_cs)-1, ]
 
-# write.table(OCN_hs, "./data_files/OCN_hs.bed", sep = "\t",
-#             quote = FALSE, row.names = FALSE, col.names = FALSE)
+ write.table(OCN_hs, "./data_files/OCN_hs.bed", sep = "\t",
+             quote = FALSE, row.names = FALSE, col.names = FALSE)
 
-# write.table(OCN_cs, "./data_files/OCN_cs.bed", sep = "\t",
-#             quote = FALSE, row.names = FALSE, col.names = FALSE)
+ write.table(OCN_cs, "./data_files/OCN_cs.bed", sep = "\t",
+             quote = FALSE, row.names = FALSE, col.names = FALSE)
 
 ```
 
+Merge the contiguous hs and cs regions that pass thresholds
 ```{bash}
 #!/bin/bash
-#SBATCH --job-name=genome_cov_Oceania
+#SBATCH --job-name=merge_bed
 #SBATCH --time=2:00:00
-#SBATCH --mem-per-cpu=10MB
+#SBATCH --mem-per-cpu=4MB
 #SBATCH --mail-type=ALL
-#SBATCH --output=Oceania_all_pops_ROH_out
+#SBATCH --output=Oceania_all_merge_out
 
-bedtools merge -i ./data_files/bedgraph/Oceania_ROH_500kb_bg.tsv > ./data_files/Oceania_hs_mergedInt.bed
+bedtools merge -i ./data_files/OCN_hs.bed > ./data_files/Oceania_hs_mergedInt.bed
+bedtools merge -i ./data_files/OCN_cs.bed > ./data_files/Oceania_cs_mergedInt.bed
 
 ```
 
+Filter for 500Kb length minimum. This removes spurious regions that appeared that might be over the frequency threshold but very short. This creates the final set of hotspots and coldspots.
+```{r}
+#final output 16 merged hs
+hs_mergedInt <- read.table("./data_files/Oceania_hs_mergedInt.bed") %>%
+  `colnames<-`(c("CHR", "POS1", "POS2")) %>%
+  mutate(POS1 = POS1+1) #need to add one to match coords back from BED format
+   
+#final output 19 merged cs
+cs_mergedInt <- read.table("./data_files/Oceania_cs_mergedInt.bed") %>%
+  `colnames<-`(c("CHR", "POS1", "POS2")) %>%
+  mutate(POS1 = POS1+1)
+
+write.table(hs_mergedInt, "./data_files/ROH_500Kb_top0.01_16_hg19.tsv", sep = "\t", 
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+write.table(cs_mergedInt, "./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", sep = "\t",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+```
 
 ### Plot hotspots and coldspots genome-wide
 ```{r}
@@ -297,7 +318,8 @@ ROH_top0.01 <- toGRanges(data.frame(chr = OCN_plot_top0.01$CHR,
                                    end = OCN_plot_top0.01$POS2))
   
 #final 19 coldspots
-OCN_plot_lower0.01 <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", header = FALSE, sep = "\t") %>%
+OCN_plot_lower0.01 <- read.table("./data_files/ROH_500Kb_lower0.01_19_hg19.tsv", header = FALSE, 
+                                 sep = "\t")%>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
   mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
   mutate(length_mb = length_kb*0.001)
