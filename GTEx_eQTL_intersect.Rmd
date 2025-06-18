@@ -4,7 +4,7 @@ output: html_document
 date: "2025-06-17"
 ---
 
-### This file contains R and bash code for overlapping GTEx eQTL eGenes with the ROH hotspots and coldspots
+## This file contains R and bash code for overlapping GTEx eQTL eGenes with the ROH hotspots and coldspots
 ```{r}
 library(tidyverse)
 library(ggplot2)
@@ -255,10 +255,6 @@ Wrapper to be used with chunk above. Outputs per sample files
 # Input PLINK .hom file is the 3rd field
 PLINKhomToBEDs.awk -v "outprefix=./data_files/individual_ROH/PIBv1_noVanuatu" ./data_files/[filename].hom
 
-#write all file names to a text file
-ls ./data_files/individual_ROH/PIBv1_noVanuatu* > individual_ROH_filenames.txt
-#grep just the Near Oceanic sample IDs
-grep -Ff PIBv1_OCN_samps.txt individual_ROH_filenames.txt > OCN_individual_ROH_filenames.txt
 ```
 
 Liftover individual files to hg38 coordinates to match GTEx files
@@ -304,17 +300,21 @@ for (i in names(full_list)){
                         start = start(i_38),
                         end = end(i_38))
 
-  write.table(i_38_df, paste0("./data_files_individual_ROH_hg38/", i, ".tsv"), sep = "\t",
+  write.table(i_38_df, paste0("./data_files/individual_ROH_hg38/", i, ".tsv"), sep = "\t",
                                col.names = TRUE, row.names = FALSE, quote = FALSE)
 }
 
 ```
 
+```{bash}
+#write all file names to a text file
+ls ./data_files/individual_ROH_hg38/PIBv1_noVanuatu* > individual_ROH_hg38_filenames.txt
 
-CONTINUE HERE 6/17
+#grep just the Near Oceanic sample IDs using file PIBv1_OCN_samps.txt (not provided)
+grep -Ff PIBv1_OCN_samps.txt individual_ROH_hg38_filenames.txt > OCN_individual_ROH_hg38_filenames.txt
+```
 
-
-Next, we overlap each individual sample ROH file with the GTEx eQTL files. Run with wrapper script in the chunk below.
+Next, we overlap each individual sample ROH file with the GTEx eQTL files. This is the main script. Run with wrapper script in the chunk below.
 ```{r}
 #!/usr/bin/env Rscript
 
@@ -402,20 +402,111 @@ R="R/4.3.2-foss-2022b" #this is the version on the cluster
 #load modules
 module load ${R}
 
-#the order of file names has to be in the same order at in the filenames.txt file
+# intersected files will be outputted with an index number and not the IDs
+# the order of file names has to be in the same order as in the *_filenames.txt file
+# field 2 contains all eQTLs and gene targets, may contain duplicate genes/positions if affecting more than one gene
+# field 3 contains only unique gene targets (should be a smaller file than 2)
 
 index=1
 while read -r i; do
 
-Rscript GTEx_filter_gen_parallel_eQTL.R ${i} ./indROH_eQTL_overlap/OCN_only/PIBv1_noVanuatu_${index}_eQTL_backgroundALL.tsv ./indROH_eQTL_overlap/backgr$
+Rscript GTEx_filter_gen_parallel_eQTL.R ${i} ./data_files/OCN_ROH_eQTL_overlap/backgroundGenes_counts/PIBv1_noVanuatu_${index}_eQTL_backgroundALL.tsv ./data_files/OCN_ROH_eQTL_overlap/_backgroundGenes_distinct/PIBv1_noVanuatu_${index}_eQTL_backgroundGenes.tsv
 ((index++))
-done < OCN_individualROH_filenames.txt  #this input txt is a list of tsv files with ROH calls for each Near Oceanic individual 
+done < OCN_individual_ROH_hg38_filenames.txt  #this input txt is a list of tsv files with ROH calls for each Near Oceanic individual 
+
+```
+
+extract counts (output has a key column of unique eQTLs (chr:pos)
+```{r}
+#!/usr/bin/env Rscript
+
+library(tidyverse)
+library(stringr)
+library(GenomicRanges)
+library(regioneR)
+
+# after overlapping with eQTLs (in hg38 space)
+args <- commandArgs(TRUE)
+
+list_names <- str_replace(list.files(path = "./data_files/OCN_ROH_eQTL_overlap/backgroundGenes_counts/",
+                                      pattern = "PIBv1_noVanuatu_*",
+                                      full.names = FALSE),
+                                      pattern = ".tsv", "")
+
+# read in the backgroundGenes files (list of gene targets for eQTLs per individual)
+full_list <- list.files(path = "./data_files/OCN_ROH_eQTL_overlap/backgroundGenes_counts/",
+                        pattern = "PIBv1_noVanuatu_*",
+                        full.names = TRUE) %>%
+  map(~read.csv(., header = TRUE,
+                comment.char = "",
+                sep = "\t",
+                check.names = FALSE)) %>%
+  `names<-`(list_names)
+
+#vector of col names to pull out
+cols <- c("chr", "variant_pos")
+
+#take the gene
+background_unique_counts <- lapply(full_list, "[", cols) %>% #takes all rows ('[') and specifies columns in "gene" vector
+                                  list_rbind(.) %>% #rbind into one long column
+				  unite(., "chr_key", chr, variant_pos, sep = ":", remove = FALSE) %>%
+                                  distinct(chr_key, .keep_all = TRUE)
+
+#write.table
+write.table(background_unique_counts, 
+            file = "./data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_counts.tsv", 
+            sep = "\t",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+```
+
+extract distinct genes (output is a single column of unique genes across all individuals)
+```{r}
+#!/usr/bin/env Rscript
+
+library(tidyverse)
+library(stringr)
+library(GenomicRanges)
+library(regioneR)
+
+# after overlapping with eQTLs (in hg38 space)
+args <- commandArgs(TRUE)
+
+list_names <- str_replace(list.files(path = "./indROH_eQTL_overlap/backgroundGenes/OCN_only",
+                                      pattern = "PIB_noVanuatu_*",
+                                      full.names = FALSE), 
+                                      pattern = ".tsv", "")
+
+# read in the backgroundGenes files (list of gene targets for eQTLs per individual)
+full_list <- list.files(path = "./indROH_eQTL_overlap/backgroundGenes/OCN_only",
+                        pattern = "PIB_noVanuatu_*",
+                        full.names = TRUE) %>%
+  map(~read.csv(., header = TRUE, 
+                comment.char = "", 
+                sep = "\t",
+                check.names = FALSE)) %>%
+  `names<-`(list_names)
+
+#vector of col names to pull out
+gene <- "gene_name"
+
+#take the gene
+background_unique_genes <- lapply(full_list, "[", gene) %>% #takes all rows ('[') and specifies columns in "gene" vector
+                                  list_rbind(.) %>% #rbind into one long column
+                                  distinct(gene_name, .keep_all = TRUE)
+
+#write.table to the first argument in the shell script
+write.table(background_unique_genes, 
+            file = "./data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_distinct.tsv",
+            sep = "\t",
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
 
 
 ```
 
+### Downstream analyses/GSEA
 
-#### Necessary files for overlap in R
+#### Necessary files for GSEA
 ```{r}
 #metadata file containing sampleIDs, Region, Population information (NOT PROVIDED)
 #contaminated/related/etc. individuals have been excluded from this metadata file
@@ -425,7 +516,7 @@ metadata <- read.table("./[filename].tsv", sep = "\t", header = TRUE, fill = TRU
   dplyr::select(SampleID, Region, Population, Island)
 
 #background set of genes for eQTL analysis in enrichr
-background_eQTLs <- read.table("data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_distinct.tsv", header = TRUE)
+background_eQTLs <- read.table("./data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_distinct.tsv", header = TRUE)
 
 # txdb file with UCSC genes
 txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
@@ -438,7 +529,10 @@ columns(org)
 keytypes(org)
 ```
 
-Read in the intersected eQTL files
+#### Identify unique genes in hotspots and coldspots
+The example below shows hotspots. The exact same pipeline is used for coldspots except using the cs19 eQTL intersect files. 
+
+Read in the intersected eQTL files for hotspots (total 16 hotspots after all filtering steps)
 ```{r}
 #vector of names that correspond to the tables we are reading in
 #since we use the same list.files function, the order should be the same
@@ -549,9 +643,10 @@ gene_alias_trans <- transId(gene_id_trans$symbol, transTo = "sym") #get any poss
 gene_alias_trans_unique <- as.data.frame(unique(gene_alias_trans$symbol)) #all unique aliases
 ```
 
-### Gene set enrichment analyses (hotspots)
-#### GSEA 1: Run enrichR for GO annotations for eQTL target genes (hotspots)
-Output from this GSEA is in Table S5
+### Gene set enrichment analyses
+#### GSEA 1: Run enrichR for GO annotations for eQTL target genes in hotspots
+
+Output from this GSEA is in Table S5 and includes GO annotations for MF, BP, and CC. GWAS catalog queries for all GSEA were performed in FUMA using the online interface for the GENE2FUNC tool.
 ```{r}
 library(enrichR)
 
@@ -572,15 +667,15 @@ if (websiteLive) {
 #  if (websiteLive) dbs 
 
 #using the most up-to-date (09/2024)
-dbs <- c("GO_Molecular_Function_2023", "GO_Biological_Process_2023", "GO_Cellular_Component_2023", "Reactome_Pathways_2024")
+dbs <- c("GO_Molecular_Function_2023", "GO_Biological_Process_2023", "GO_Cellular_Component_2023")
 if (websiteLive) {
     enriched <- enrichr(gene_alias_trans_unique$`unique(gene_alias_trans$symbol)`, dbs, background = background_eQTLs$gene_name) #unique gene alias and background of all eQTLs found in an Oceanic ROH
 }
 
-#look at molecular function --> no sig
+#look at molecular function
 GO_MF_eQTL_hs <- if (websiteLive) enriched[["GO_Molecular_Function_2023"]]
 
-#look at biological process --> sig = 0.0003094375 for B Cell receptor signaling pathway (Adj p.val)
+#look at biological process 
 GO_BP_eQTL_hs <- if (websiteLive) enriched[["GO_Biological_Process_2023"]]
 
 # cell component --> no sig
@@ -600,4 +695,335 @@ for(i in 1:length(tables)){
                row.names = FALSE, col.names = TRUE)
  }
 
+```
+
+#### GSEA 2: Run enrichR for GO annotations for eQTL genes that are physically overlapping hotspots
+We first need a list of genes that are found within the hotspots.
+```{r}
+chr_levels <- c("chr1", "chr2",  "chr5", 
+                "chr8", "chr11", "chr14", "chr15", "chr17", "chr22")
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+
+org <- org.Hs.eg.db
+
+#get the txdb genes and adjust to UCSC chr version
+gene_dat <- genes(txdb)
+seqlevelsStyle(gene_dat) <- "UCSC"
+
+#hotspot table, in hg19 since the UCSC txdb object is in hg19
+OCN_hs_mergedInt16 <- read.table("./data_files/ROH_500Kb_top0.01_16_hg19.tsv", sep = "\t", header = FALSE) %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2')) %>%
+  toGRanges()
+
+OCN_hs_mergedInt16_df <- read.table("./data_files/ROH_500Kb_top0.01_16_hg19.tsv") %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2')) %>%
+  mutate(CHR = factor(CHR, levels = chr_levels)) %>%
+  arrange(CHR)
+
+#find the overlaps in between
+hs_genes <- findOverlaps(gene_dat, OCN_hs_mergedInt16)
+
+#after overlapping get the gene annots
+df_annot <- cbind(OCN_hs_mergedInt16_df[subjectHits(hs_genes),], gene_dat[queryHits(hs_genes),]) %>%
+   `colnames<-`(c("CHR", "POS1", "POS2",             #rename --> POS1/POS2 are the hs endpoints
+                 "Chr", "Start", "End", "Width", "Strand", "gene_id"))  
+
+#in genekitr, convert the IDs to HGNC IDs and then intersect with af_annot to get the files
+ids <- unique(df_annot$gene_id)
+
+#translate geneIDs to HGNC
+hgnc_sym <- transId(id = ids, transTo = "symbol", hgVersion = "v19", unique = TRUE)
+
+#translate any aliases (these were double checked at https://www.genenames.org/tools/multi-symbol-checker/)
+hgnc_sym_alias <- transId(hgnc_sym$symbol, transTo = "sym", unique = TRUE)
+
+hgnc_alias_merge <- hgnc_sym %>%
+  left_join(., hgnc_sym_alias, by = c("symbol" = "input_id"))
+
+merge <- df_annot %>%
+  left_join(., hgnc_alias_merge, by = c("gene_id" = "input_id"))
+
+#symbol.y has the translated aliases
+merge_noNA <- df_annot %>%
+  left_join(., hgnc_alias_merge, by = c("gene_id" = "input_id")) %>%
+  mutate(symbol.y = ifelse(is.na(symbol.y), "-", symbol.y)) %>%
+  filter(symbol.y == "-" & POS1 == 21905305 | symbol.y != "-" )  #keeps the hs with no genes, removes the ones with missing HGNC ids otherwise
+
+merge_sort <- merge_noNA %>%
+  group_by(CHR, POS1, POS2) %>%
+  summarise(Genes = paste(symbol.y, collapse = ", ")) %>%
+  mutate(CHR = factor(CHR, levels = chr_levels)) %>%
+  arrange(CHR)
+
+```
+
+Repeat GSEA but for genes within hotspots
+```{r}
+genes_in_hs <- merge_noNA$symbol.y
+
+#list of protein coding genes from enrichR github
+background2 <- load(file = "data_files/background.rda")
+
+websiteLive <- getOption("enrichR.live")
+if (websiteLive) {
+    listEnrichrSites()
+    setEnrichrSite("Enrichr") # Human genes   
+}
+
+
+#using the most up-to-date (09/2024)
+dbs <- c("GO_Molecular_Function_2023", "GO_Biological_Process_2023", "GO_Cellular_Component_2023")
+
+
+if (websiteLive) {
+    enriched <- enrichr(genes_in_hs, dbs, background = background) #unique gene alias from transfer step
+}
+
+#look at molecular function --> Regulatory RNA Binding (adj. p-val 0.03487951)
+GO_MF_genes_hs <- if (websiteLive) enriched[["GO_Molecular_Function_2023"]]
+
+#look at biological process --> RISC Complex Assembly, RNA-mediated Gene Silencing, miRNA Processing, pre-miRNA Processing
+GO_BP_genes_hs <- if (websiteLive) enriched[["GO_Biological_Process_2023"]]
+
+# cell component --> no sig
+GO_CC_genes_hs <- if (websiteLive) enriched[["GO_Cellular_Component_2023"]]
+
+
+tables <- list(GO_MF_genes_hs, GO_BP_genes_hs, GO_CC_genes_hs)
+tables_names <- c("GO_MF_genes_hs", "GO_BP_genes_hs", "GO_CC_genes_hs")
+  
+tables <- tables %>%
+  `names<-`(tables_names) %>%
+  map(~.x %>% filter(Adjusted.P.value < 0.01)) # filter threshold 0.01
+
+#results are also found in Table S5
+ for(i in 1:length(tables)){
+    write.table(tables[[i]], paste0("./tables/Supp5_", names(tables[i]), ".tsv"), sep = "\t", quote = FALSE,
+                row.names = FALSE, col.names = TRUE)
+  }
+
+```
+
+### Hypergeometric test 
+Again this should be repeated for coldspots with coldspot input files
+```{r}
+#number of sites that are eQTLs in hs
+hs_eQTL_counts <- length(df_rownames_biallele)  #number taken from hs total eQTLs 
+
+#number of sites that are eQTLs in any ROH 
+# take the count from the indROH files of distinct chr_pos keys
+background_allROH_eQTL <- read.table("./data_files/eQTL_intersect_output/backgroundGenes_500Kb/PIBv1_noVanuatu_OCNinds_backgroundGenes_counts.tsv", sep = "\t", header = TRUE)
+
+background_allROH_eQTL_counts <- length(background_allROH_eQTL$chr_key)  #263,542
+   
+#total length of all ROH segments --> 2,682,499,439 (almost the length of the genome)
+all_ROH_sites <- read.table("./data_files/global_ROH_freq_500kb.tsv", sep = "\t", header = TRUE) %>%
+  filter(Region %in% "Oceania") %>%
+  filter(POS2 != 0) %>%
+  mutate(length = POS2-POS1,
+         length_kb = length*0.001) %>%  
+  filter(ind_calls >= 1) %>% #filter regions where at least 1 individual has an ROH
+  summarise(all_ROH_length = sum(length)) %>%
+  as.numeric()
+
+#total length of hotspots 
+hs_sites <- OCN_hs_mergedInt16_38_df %>% #replace with ./data_files/ROH_500Kb_lower0.01_19_hg38.tsv for coldspots
+  mutate(length = POS2-POS1,
+         length_kb = length*0.001) %>%
+  summarise(hs_length = sum(length)) %>%
+  as.numeric()
+
+#run phyper 
+result_hs <- phyper(q = hs_eQTL_counts - 1,
+                 m = background_allROH_eQTL_counts,
+                 n = all_ROH_sites - background_allROH_eQTL_counts,
+                 k = hs_sites,
+                 lower.tail = FALSE)
+
+# fold enrichment of eQTLs in hotspots (1.7038)
+# proportion observed divided by proportion expected
+# (q/k)/(m/(m+n))
+hyper_extra_hs <- (hs_eQTL_counts/hs_sites)/(background_allROH_eQTL_counts/all_ROH_sites)
+
+```
+
+#### Creating Tables 2 and 3 and Tables S3 and S4
+```{r}
+#Function for getting the average, min, and max freq of each hotspot 
+#Input:
+  #1. A list of merged hotspots (CHR,POS1, POS2 bed format, should be 1-based)
+  #2. A df of unmerged hotspots, filtered above 1% threshold, with frequencies for each segment
+#Output:
+  #1. A dataframe of each merged hotspot (CHR, POS1, POS2)and the mean, max, and min frequency over the region
+
+hs_split_func <- function(list, df2){
+  new_df_list <- list()         #create an output list
+  for(i in 1:length(list)){         #forloop to iterate over every element in the list
+    new_df_list[[i]] <- df2 %>%     # filter for matching CHR and within the merged hs, write to df in list
+      filter(CHR == list[[i]]$CHR & 
+               df2$POS1 >= list[[i]]$POS1 & 
+               df2$POS2 <= list[[i]]$POS2) %>%
+      summarise(mean_freq = mean(ROH_freq),    #summarise to get the avg, max, and min
+                min_freq = min(ROH_freq), 
+                max_freq = max(ROH_freq)) %>%
+      cbind(list[[i]][1:3])                    #cbind the corresponding CHR, POS1, POS2 col to each new df
+  }
+  output_df <- bind_rows(new_df_list)          #bind all dfs in new_df_list to a dataframe and return
+  return(output_df)
+}
+
+
+#hg19 list
+OCN_hs_mergedInt16_list <- OCN_hs_mergedInt16_df %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2')) %>%
+  unite(., "key",                          #create key col with CHR/POS1/POS2 for splitting into the list
+        CHR, POS1, POS2,
+        sep = ":", remove = FALSE) %>%
+  mutate(key = as.factor(key)) %>%
+  group_by(key) %>%
+  group_split(key) %>%
+  setNames(paste0("hs_", seq(1, 16, by = 1))) %>%
+  map(~.x %>% dplyr::select(-key)) %>%
+  map(~.x %>% mutate(POS1 = as.numeric(POS1),
+                     POS2 = as.numeric(POS2)))
+
+#frequencies of each segment, output from genomecov
+OCN_hs_withfreq <- read.table("./data_files/global_ROH_freq_500kb.tsv", header = TRUE) %>%
+  filter(Region == "Oceania") %>%
+  filter(POS2 != 0) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001) %>%   #Mb lengths
+  mutate(CHR = paste0("chr", CHR)) %>%
+  filter(ROH_freq >= 0.1762590)   # replace with 0.017985612 for coldspots
+
+
+OCN_hs_meanfreq_df <- hs_split_func(OCN_hs_mergedInt16_list, OCN_hs_withfreq)
+
+OCN_hs_meanfreq_df <- OCN_hs_meanfreq_df %>%
+  mutate(CHR = factor(CHR, levels = chr_levels)) %>%
+  arrange(CHR)
+```
+
+Get the number of eQTLs in the hotspots
+```{r}
+
+eQTL_hs_coord <- df_rownames_biallele %>%
+  separate(key, c("gene", "CHR", "POS"), ":")
+
+# read in the hg38 hotspot coordinates
+# replace with ./data_files/ROH_500Kb_lower0.01_19_hg38.tsv for coldspots
+OCN_hs_mergedInt16_38_df <- read.table("./data_files/ROH_500Kb_top0.01_16_hg38.tsv", header = TRUE, sep = "\t") %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2')) %>%
+    unite(., "key",                          #create key col with CHR/POS1/POS2 for splitting into the list
+        CHR, POS1, POS2,
+        sep = ":", remove = FALSE) %>%
+  mutate(key = as.factor(key))
+
+#split to list
+OCN_hs_mergedInt16_38_list <- OCN_hs_mergedInt16_38_df %>%
+  group_by(key) %>%
+  group_split(key) %>%
+  setNames(paste0("hs_", seq(1, 16, by = 1))) %>%
+  map(~.x %>% dplyr::select(-key)) %>%
+  map(~.x %>% mutate(POS1 = as.numeric(POS1),
+                     POS2 = as.numeric(POS2)))
+
+#hg19 list
+OCN_hs_mergedInt16_list <- OCN_hs_mergedInt16_df %>%
+  `colnames<-`(c('CHR', 'POS1', 'POS2')) %>%
+  unite(., "key",                          #create key col with CHR/POS1/POS2 for splitting into the list
+        CHR, POS1, POS2,
+        sep = ":", remove = FALSE) %>%
+  mutate(key = as.factor(key)) %>%
+  group_by(key) %>%
+  group_split(key) %>%
+  setNames(paste0("hs_", seq(1, 16, by = 1))) %>%
+  map(~.x %>% dplyr::select(-key)) %>%
+  map(~.x %>% mutate(POS1 = as.numeric(POS1),
+                     POS2 = as.numeric(POS2)))
+
+#Input: 
+    # 1. A list of merged hotspots
+    # 2. a dataframe of eQTLs that overlap the merged hotspots, needs at least chr and pos
+#Output:
+    # 1. a dataframe of all hotspots and the total number of eQTLs in them
+
+hs_eQTL_split_func <- function(list, df2){
+  new_df_list <- list()         #create an output list
+  for(i in 1:length(list)){         #forloop to iterate over every element in the list
+    new_df_list[[i]] <- df2 %>%     # filter for matching CHR and within the merged hs, write to df in list
+      filter(CHR == list[[i]]$CHR & 
+               df2$POS >= list[[i]]$POS1 & 
+               df2$POS <= list[[i]]$POS2) %>%
+      distinct(CHR, POS) %>%
+      summarise(total = n()) %>%          # summarize to get the total number of eQTLs per region
+      cbind(list[[i]][1:3])                    #cbind the corresponding CHR, POS1, POS2 col to each new df
+  }
+  output_df <- bind_rows(new_df_list)          #bind all dfs in new_df_list to a dataframe and return
+  return(output_df)
+}
+
+# hg38 overlap
+eQTL_hs_total_overlap38 <- hs_eQTL_split_func(OCN_hs_mergedInt16_38_list, eQTL_hs_coord)
+
+eQTL_hs_total_overlap38 <- eQTL_hs_total_overlap38 %>%
+  mutate(CHR = factor(CHR, levels = chr_levels)) %>%
+  arrange(CHR, POS1)
+  
+
+#hg19 overlap, need this to overlap with the gene list
+eQTL_hs_total_overlap <- hs_eQTL_split_func(OCN_hs_mergedInt16_list, eQTL_hs_coord) %>%
+  mutate(CHR = factor(CHR, levels = chr_levels)) %>%
+  arrange(CHR, POS1)
+
+#overlap to get genes (hg19)
+gene_eQTL_hs_annot <- full_join(merge_sort, eQTL_hs_total_overlap, by = c("CHR", "POS1", "POS2")) %>%
+  left_join(., OCN_hs_meanfreq_df, by = c("CHR", "POS1", "POS2")) %>%    #merge with the version with freqs from above chunk
+  mutate(CHR = factor(CHR, levels = chr_levels),
+         Length = round((POS2 - POS1)*0.000001, 3),
+         mean_freq = round(mean_freq, 4)*100,
+         min_freq = round(min_freq, 4)*100,
+         max_freq = round(max_freq, 4)*100,
+         Position = paste0(POS1, "-", POS2),
+         Range = paste0(mean_freq, " (",min_freq, "-", max_freq, ")")) %>%
+  ungroup() %>%
+  arrange(CHR, POS1) %>%
+  mutate(total = eQTL_hs_total_overlap38$total) %>% #replace with the correct eQTLs from hg38 df
+  arrange(desc(max_freq)) %>%
+  dplyr::select(-POS1, -POS2, -min_freq, -max_freq, -mean_freq) %>%
+  relocate(Position, .after = CHR) %>%
+  relocate(Length, .after = Position) %>%
+  relocate(Range, .after = Length) %>%
+  relocate(total, .after = Range) %>%
+  `colnames<-`(c("Chr", "Position", "Length (Mbp)", "Mean Frequency % (Range)",
+                 "Total number of eQTLs", "Protein-coding genes"))
+
+# Table S3
+write.table(gene_eQTL_hs_annot, "./figures/TableS3_hs16_final.tsv", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+
+#top 10 version for Table 2
+gene_eQTL_hs_annot10 <- full_join(merge_sort, eQTL_hs_total_overlap, by = c("CHR", "POS1", "POS2")) %>%
+  left_join(., OCN_hs_meanfreq_df, by = c("CHR", "POS1", "POS2")) %>%    #merge with the version with freqs from above chunk
+  mutate(CHR = factor(CHR, levels = chr_levels),
+         Length = round((POS2 - POS1)*0.000001, 3),
+         mean_freq = round(mean_freq, 4)*100,
+         min_freq = round(min_freq, 4)*100,
+         max_freq = round(max_freq, 4)*100,
+         Position = paste0(POS1, "-", POS2),
+         Range = paste0(mean_freq, " (",min_freq, "-", max_freq, ")")) %>%
+  ungroup() %>%
+  arrange(CHR, POS1) %>%
+  mutate(total = eQTL_hs_total_overlap38$total) %>%
+  slice_max(max_freq, n = 10) %>%
+  arrange(desc(max_freq)) %>%
+  dplyr::select(-POS1, -POS2, -min_freq, -max_freq, -mean_freq) %>%
+  relocate(Position, .after = CHR) %>%
+  relocate(Length, .after = Position) %>%
+  relocate(Range, .after = Length) %>%
+  relocate(total, .after = Range) %>%
+  `colnames<-`(c("Chr", "Position", "Length (Mbp)", "Mean Frequency % (Range)",
+                 "Total number of eQTLs", "Protein-coding genes")) 
+#Table 2
+write.table(gene_eQTL_hs_annot10, "./figures/Table2_top10_hs_genes38_final.tsv", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
 ```

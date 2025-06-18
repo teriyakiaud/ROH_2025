@@ -60,7 +60,9 @@ write.table(Island_Southeast_Asia_global_split, "./data_files/BEDfiles/Island_So
 write.table(Oceania_global_split, "./data_files/BEDfiles/Oceania_ROH_500kb.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
 ```
 
-### genomecov script
+### Run bedtools genomecov
+Using the files above as input run bedtools genomecov for each worldwide region separately.
+This bash script is run using the wrapper in the chunk below
 ```{bash}
 #!/bin/bash
 
@@ -73,7 +75,7 @@ bedtools genomecov -i ${bedfile} -g ${genomefile} -bga > ${outprefix}
 
 ```
 
-### genomecov wrapper, used in conjunction with above chunk
+Genomecov wrapper, used in conjunction with chunk above
 ```{bash}
 #!/bin/bash
 #SBATCH --job-name=genome_cov_Oceania
@@ -204,6 +206,8 @@ global_bg_freq <- global_bg_mod %>%
 
 global_bg_freq$Region <- factor(global_bg_freq$Region, levels = global_region_levels)
 
+#write to table
+write.table(global_bg_freq, "./data_files/global_ROH_freq_500kb.tsv", sep = "\t", row.names = FALSE, col.names = TRUE)
 ```
 
 ### Identify top hotspots and coldspots per region
