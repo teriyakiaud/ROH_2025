@@ -22,7 +22,7 @@ index=1
 while read -r i; do
 plink2 --threads 10 --set-missing-var-ids '@_#_$r_$a' --const-fid 0 --make-pgen vzs --snps-only --min-alleles 2 --max-alleles 2 --remove PIBv1_samples_to_exclude.txt --vcf $i --out PIBv1_global_phased_minFIL_chr$index
 ((index++))
-done < fullVCF_list_final_phased.txt > VCFtoPLINK2_convert.log
+done < Oceania_fullVCF_list_final_phased.txt > VCFtoPLINK2_convert.log
 
 
 #merge individual chr files together
