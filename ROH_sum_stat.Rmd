@@ -21,43 +21,6 @@ library(dunn.test)
 library(stats)
 ```
 
-### Create .hom and .hom.indiv files
-```{bash}
-#!/bin/bash
-#SBATCH --job-name={prefix}_MAF0.01_LDpruned_ROH
-#SBATCH --mem=4G
-#SBATCH --cpus-per-task=10
-#SBATCH --time=30:00
-#SBATCH --output={prefix}_MAF0.01_LDpruned_ROH_500Kb.log
-
-#replace with specific PLINK version (PLINK 1.9)
-PLINK="PLINK/1.9b_6.21-x86_64"
-
-#prefix for LD and MAF0.01 pruned bed/bim/fam files 
-#contaminated/related/etc. individuals were removed prior to pruning
-prefix="./[input_file]"
-
-out_prefix="global_autosomes"
-
-module load ${PLINK}
-
-plink --threads 10 \
---not-chr 23 \
---homozyg \
---homozyg-kb 500 \
---homozyg-snp 50 \
---homozyg-window-snp 50 \
---homozyg-window-het 0 \
---homozyg-window-missing 5 \
---homozyg-window-threshold 0.05 \
---homozyg-density 5000 \
---homozyg-gap 5000 \
---bfile ${prefix} \
---out ${out_prefix}_500Kb
-
-```
-
-
 ```{r}
 #read in .hom and .hom.indiv files
 hom_indiv <- read.table("./data_files/[filename].hom.indiv", header = TRUE)
