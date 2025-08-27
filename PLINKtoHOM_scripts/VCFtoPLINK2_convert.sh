@@ -33,4 +33,5 @@ done < fullVCF_list_final_phased.txt > VCFtoPLINK2_convert.log
 plink2 --threads 10 --pfile PIBv1_global_phased_minFIL_chr1 vzs --pmerge-list PIBv1_global_phased_minFIL_list.txt pfile-vzs --pmerge-output-vzs --out PIBv1_global_minFIL_allCHR > PLINK2merge.log
 
 #convert to PLINK 1.9 bed format
+#outputs BED/BIM/FAM files for input into next PLINK step
 plink2 --threads 10 --pfile PIBv1_global_minFIL_allCHR vzs --make-bed --out PIBv1_global_minFIL_allCHR_no_Vanuatu > PLINK2PLINK1_convert.log
