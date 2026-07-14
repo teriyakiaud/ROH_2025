@@ -288,12 +288,20 @@ Filter for 500Kb length minimum. This removes spurious regions that appeared tha
 #final output of merged hs
 hs_mergedInt <- read.table("./data_files/OCN_hs_mergedInt.bed") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
-  mutate(POS1 = POS1+1) #need to add one to match coords back from BED format
-   
+  mutate(POS1 = POS1+1) %>% #need to add one to match coords back from BED format
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001) %>%
+  filter(length_kb >= 500) %>%
+  dplyr::select(CHR, POS1, POS2)
+
 #final output of merged cs
 cs_mergedInt <- read.table("./data_files/OCN_cs_mergedInt.bed") %>%
   `colnames<-`(c("CHR", "POS1", "POS2")) %>%
-  mutate(POS1 = POS1+1)
+  mutate(POS1 = POS1+1) %>%
+  mutate(length_kb = (POS2-POS1)*0.001) %>%  #Kb lengths
+  mutate(length_mb = length_kb*0.001) %>%
+  filter(length_kb >= 500) %>%
+  dplyr::select(CHR, POS1, POS2)
 
 write.table(hs_mergedInt, "./data_files/ROH_500Kb_top0.01_16_hg19.tsv", sep = "\t", 
             row.names = FALSE, col.names = TRUE, quote = FALSE)
